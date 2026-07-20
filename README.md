@@ -60,6 +60,26 @@ pnpm install
 pnpm build
 ```
 
+## Product surface
+
+| Surface | Role |
+|---------|------|
+| **MCP** (`frida-mcp`) | Interactive AI/human probe (main) |
+| **CLI** (`cli/frida-ios.mjs`) | Scripts / CI / one-shot |
+| **Core** (`src/backend.ts` + `session`) | Shared — both call `handleMethod` |
+
+```bash
+# CLI (after build)
+pnpm cli help
+pnpm cli open --bundleId com.ss.iphone.ugc.Ame --withSpringBoard
+pnpm cli call wait --ms 4000
+pnpm cli snap --limit 20
+pnpm cli call net_dump --summaryOnly
+pnpm cli close
+```
+
+**Open-source safety:** `net_dump` **redacts** Authorization / Cookie / `*Token*` by default.  
+Use `redact:false` only on trusted local machines — never paste raw dumps into issues/PRs.
 ## Modes
 
 ### Embedded (default, recommended for Grok/Cursor trial)

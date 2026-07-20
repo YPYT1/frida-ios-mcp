@@ -140,8 +140,8 @@ export function resolveSearchMode(
   if (!search) return { useRegex: false, autoRegex: false };
   if (searchRegex === true) return { useRegex: true, autoRegex: false };
   if (searchRegex === false) return { useRegex: false, autoRegex: false };
-  // Auto: unescaped | suggests alternation regex (common AI mistake)
-  if (/(?<!\\)\|/.test(search)) {
+  // Auto: | suggests alternation regex (common AI mistake with 個人|新增)
+  if (search.includes("|")) {
     return { useRegex: true, autoRegex: true };
   }
   return { useRegex: false, autoRegex: false };
@@ -183,7 +183,7 @@ function filterNodes(
       (n.tappable ? 1000 : 0) + (n.onScreen ? 500 : 0) + n.w * n.h;
     return score(b) - score(a);
   });
-  return nodes;
+  return { nodes, searchMeta };
 }
 
 function formatDiff(prev: SnapshotTable, cur: SnapshotTable): string[] {

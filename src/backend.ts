@@ -144,12 +144,17 @@ export async function handleMethod(
       }
       case "screen_snapshot": {
         const mode = params.mode as "texts" | "tree" | undefined;
+        const searchRegexRaw = params.searchRegex ?? params.regex;
         const { text } = await sessionStore.screenSnapshot({
           mode,
           onScreenOnly: boolParam(params.onScreenOnly, true),
           limit: params.limit != null ? Number(params.limit) : 40,
           search: typeof params.search === "string" ? params.search : undefined,
-          searchRegex: Boolean(params.searchRegex ?? params.regex),
+          // undefined = allow auto-regex on "|"; only pass true/false when caller set it
+          searchRegex:
+            searchRegexRaw === undefined || searchRegexRaw === null
+              ? undefined
+              : Boolean(searchRegexRaw),
           showDiff: Boolean(params.showDiff),
         });
         return textResult(text);
@@ -160,7 +165,7 @@ export async function handleMethod(
         // Align with snapshot search: auto-regex when query contains |
         let useRegex = Boolean(params.regex);
         let autoRegex = false;
-        if (params.regex === undefined && /(?<!\\)\|/.test(query)) {
+        if (params.regex === undefined && query.includes("|")) {
           useRegex = true;
           autoRegex = true;
         }
@@ -310,7 +315,7 @@ export async function handleMethod(
               ? Boolean(params.retryOnFail)
               : params.retry_on_fail != null
                 ? Boolean(params.retry_on_fail)
-                : undefined,
+                : false,
           resnapshot: boolParam(params.resnapshot, true),
         });
         return jsonResult(r);
@@ -359,6 +364,9 @@ export async function handleMethod(
         const r = await sessionStore.netDump({
           limit: params.limit != null ? Number(params.limit) : undefined,
           query: typeof params.query === "string" ? params.query : undefined,
+          // Default redact=true for open-source safety
+          redact: params.redact === false ? false : true,
+          summaryOnly: Boolean(params.summaryOnly),
         });
         return jsonResult(r);
       }

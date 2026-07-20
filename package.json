@@ -9,7 +9,8 @@
   },
   "bin": {
     "frida-mcp": "./dist/index.js",
-    "frida-mcp-daemon": "./dist/daemon.js"
+    "frida-mcp-daemon": "./dist/daemon.js",
+    "frida-ios": "./cli/frida-ios.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,6 +18,7 @@
     "dev:daemon": "tsx src/daemon.ts",
     "start": "node dist/index.js",
     "start:daemon": "node dist/daemon.js",
+    "cli": "node cli/frida-ios.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

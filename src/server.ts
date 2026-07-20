@@ -349,17 +349,21 @@ export function createMcpServer(): McpServer {
   server.tool(
     "smart_type_text",
     [
-      "PREFERRED typing: tap input (ref|x,y) → wait firstResponder → human_pause → 拟人逐字.",
-      "Retries once on fail. resnapshot default true.",
+      "PREFERRED typing: tap real input (ref|x,y) → wait canInsertText → 拟人逐字.",
+      "Rejects chrome/chips (e.g. 有什麼好事). retryOnFail default false (safer on TikTok).",
+      "resnapshot default true. Do not use on nav tabs.",
     ].join(" "),
     {
       text: z.string(),
-      ref: z.string().optional().describe("Input field ref e.g. g2t5"),
+      ref: z.string().optional().describe("Real text field ref only"),
       x: z.number().optional(),
       y: z.number().optional(),
       perCharDelayMs: z.number().optional().describe("Default 90"),
       waitKeyboardMs: z.number().optional().describe("Default 2000"),
-      retryOnFail: z.boolean().optional().describe("Default true"),
+      retryOnFail: z
+        .boolean()
+        .optional()
+        .describe("Default false — avoid kill-session retry storms"),
       resnapshot: z.boolean().optional().describe("Default true"),
     },
     async (args) => toolResult(await run("smart_type_text", args)),
@@ -448,12 +452,24 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "net_dump",
-    "Dump captured HTTP(S) entries (method/url/headers/body preview/status). Optional query substring + limit.",
+    [
+      "Dump captured HTTP(S). DEFAULT redacts Authorization/Cookie/*Token* (open-source safe).",
+      "redact:false only on trusted local machines. summaryOnly:true → host counts only.",
+    ].join(" "),
     {
-      limit: z.number().optional().describe("Max entries to return, default 50"),
+      limit: z.number().optional().describe("Max entries, default 50"),
       query: z.string().optional().describe("Filter substring on url/method/status"),
+      redact: z
+        .boolean()
+        .optional()
+        .describe("Default true. false = raw secrets (dangerous for logs/PRs)"),
+      summaryOnly: z
+        .boolean()
+        .optional()
+        .describe("If true, only host aggregation (low noise)"),
     },
-    async ({ limit, query }) => toolResult(await run("net_dump", { limit, query })),
+    async ({ limit, query, redact, summaryOnly }) =>
+      toolResult(await run("net_dump", { limit, query, redact, summaryOnly })),
   );
 
   return server;

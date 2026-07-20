@@ -60,6 +60,9 @@ class SessionStore {
   private snapshot: SnapshotTable | null = null;
   /** Previous texts snapshot for showDiff */
   private prevSnapshot: SnapshotTable | null = null;
+  /** Last successful snapshot meta (survives act-clear for status reads) */
+  private lastSnapMeta: { generation: number; at: number; nodeCount: number } | null =
+    null;
   /** Last tree dump text (does not replace text ref table) */
   private lastTreeText: string | null = null;
 
@@ -158,7 +161,12 @@ class SessionStore {
       alive: !!s.alive,
       open: s.open,
       bundleId: s.bundleId,
-      hasSnapshot: s.hasSnapshot,
+      /** Current in-memory ref table valid */
+      hasSnapshot: !!this.snapshot,
+      /** Last completed snapshot gen (may be stale after act cleared refs) */
+      lastSnapshotGeneration:
+        this.snapshot?.generation ?? this.lastSnapMeta?.generation,
+      snapshotStale: !this.snapshot && !!this.lastSnapMeta,
       snapshotGeneration: s.snapshotGeneration,
     };
   }
@@ -183,6 +191,7 @@ class SessionStore {
       ok: true,
       result,
       ...extra,
+      warn: "Do not parallelize app acts (tap/swipe/type/smart_type). App+SB dual parallel is OK.",
       next: snapshotText
         ? "Use refs from snapshot below (this generation only)."
         : "call screen_snapshot before next ref-based action",
@@ -562,6 +571,11 @@ class SessionStore {
     });
     // Next showDiff compares against this complete table
     this.prevSnapshot = table;
+    this.lastSnapMeta = {
+      generation: table.generation,
+      at: Date.now(),
+      nodeCount: table.nodes.length,
+    };
     return { text, table };
   }
 
@@ -885,8 +899,31 @@ class SessionStore {
   }
 
   /**
-   * SmartTypeTextAction: tap → wait FR → human_pause → 拟人逐字 (+retry).
-   * Internal taps use resnapshot=false; optional final resnapshot defaults true.
+   * Heuristic: status chips / non-fields often destroy TikTok session if tapped as "input".
+   * e.g.「有什麼好事？」「發佈」「好友」are not text fields.
+   */
+  private looksLikeNonInputLabel(label: string): boolean {
+    const t = label.trim();
+    if (!t) return false;
+    // Short nav / tab / CTA labels
+    if (
+      /^(首頁|好友|收信匣|個人資料|發佈|關注中|為您推薦|搜尋|搜索|取消|完成|發送|发佈)$/i.test(
+        t,
+      )
+    ) {
+      return true;
+    }
+    // Feed status / prompt chips (not real UITextField)
+    if (/有什麼|有什么|好事|说点什么|說點什麼|添加评论|新增留言/i.test(t) && t.length <= 24) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * SmartTypeTextAction: tap → wait FR → human_pause → 拟人逐字.
+   * Safer defaults: reject non-input labels; no aggressive retry on dead session;
+   * require canInsertText before typing when possible.
    */
   async smartTypeText(opts: {
     text: string;
@@ -895,6 +932,7 @@ class SessionStore {
     y?: number;
     perCharDelayMs?: number;
     waitKeyboardMs?: number;
+    /** Default false — retry often kills TikTok after bad first tap */
     retryOnFail?: boolean;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
@@ -909,7 +947,7 @@ class SessionStore {
     }
 
     const waitKeyboardMs = opts.waitKeyboardMs ?? 2000;
-    const retryOnFail = opts.retryOnFail !== false;
+    const retryOnFail = opts.retryOnFail === true; // default OFF for stability
     const perCharDelayMs =
       opts.perCharDelayMs != null && Number.isFinite(opts.perCharDelayMs)
         ? Math.max(0, Number(opts.perCharDelayMs))
@@ -920,6 +958,17 @@ class SessionStore {
     let tapMeta: Record<string, unknown> = {};
     if (opts.ref) {
       const n = this.resolveRef(opts.ref);
+      if (this.looksLikeNonInputLabel(n.text)) {
+        throw new ProbeError(
+          "NOT_INPUT",
+          `ref ${opts.ref} text ${JSON.stringify(n.text)} looks like chrome/chip, not a text field. Do not smart_type it.`,
+          [
+            "screen_snapshot({ search: \"搜尋|Search|评论|留言\" })",
+            "tap a real field then type_text",
+            "first_responder to verify canInsertText",
+          ],
+        );
+      }
       tapX = n.cx;
       tapY = n.cy;
       tapMeta = { ref: n.ref, label: n.text };
@@ -929,13 +978,15 @@ class SessionStore {
     }
 
     const tapTarget = async () => {
-      // Do not resnapshot mid-flow (would burn time / lose focus race)
       await this.rpc("tap", [tapX, tapY]);
       this.snapshot = null;
       return { x: tapX, y: tapY, ...tapMeta };
     };
 
-    const waitFirstResponder = async (): Promise<unknown> => {
+    const waitFirstResponder = async (): Promise<{
+      fr: unknown;
+      canInsert: boolean;
+    }> => {
       const deadline = Date.now() + waitKeyboardMs;
       let last: unknown = null;
       while (Date.now() < deadline) {
@@ -946,14 +997,17 @@ class SessionStore {
             typeof last === "object" &&
             (last as { canInsertText?: boolean }).canInsertText
           ) {
-            return last;
+            return { fr: last, canInsert: true };
           }
-        } catch {
-          /* keep polling */
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/script is destroyed|session is dead|destroyed/i.test(msg)) {
+            throw e;
+          }
         }
         await new Promise((r) => setTimeout(r, 100));
       }
-      return last;
+      return { fr: last, canInsert: false };
     };
 
     const tryType = async () => {
@@ -961,19 +1015,81 @@ class SessionStore {
         const frida = await this.rpc("inputText", [text, perCharDelayMs]);
         return { ok: true as const, frida };
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
         return {
           ok: false as const,
-          error: e instanceof Error ? e.message : String(e),
+          error: msg,
+          fatal: /script is destroyed|session is dead|destroyed/i.test(msg),
         };
       }
     };
 
     await this.humanPause(80, 200);
-    const tap1 = await tapTarget();
-    const fr1 = await waitFirstResponder();
-    await this.humanPause(200, 400);
+    let tap1: Record<string, unknown>;
+    try {
+      tap1 = await tapTarget();
+    } catch (e) {
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 300).catch(
+        () => undefined,
+      );
+      throw e instanceof ProbeError
+        ? e
+        : new ProbeError(
+            "SCRIPT_DESTROYED",
+            e instanceof Error ? e.message : String(e),
+            ["session_respawn", "wait(4000)", "screen_snapshot"],
+          );
+    }
 
+    let frWait: { fr: unknown; canInsert: boolean };
+    try {
+      frWait = await waitFirstResponder();
+    } catch (e) {
+      const snapshot = await this.maybeResnapshot(false).catch(() => undefined);
+      void snapshot;
+      throw new ProbeError(
+        "SCRIPT_DESTROYED",
+        e instanceof Error ? e.message : String(e),
+        ["session_respawn", "wait(4000)", "screen_snapshot", "avoid non-input refs"],
+      );
+    }
+
+    if (!frWait.canInsert) {
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
+      return {
+        ...this.actEnvelope(
+          { ok: false, reason: "no canInsertText after tap" },
+          snapshot,
+          {
+            action: "SmartTypeTextAction",
+            ok: false,
+            code: "NOT_INPUT",
+            text,
+            tap: tap1,
+            firstResponder: frWait.fr,
+            retried: false,
+            recovery: [
+              "ref is probably not an editable field",
+              "screen_snapshot search for 搜尋/Search/评论",
+              "first_responder before type_text",
+            ],
+          },
+        ),
+        ok: false,
+      };
+    }
+
+    await this.humanPause(200, 400);
     let type1 = await tryType();
+    if (type1.fatal) {
+      throw new ProbeError("SCRIPT_DESTROYED", type1.error, [
+        "session_respawn",
+        "wait(4000)",
+        "screen_snapshot",
+        "do not retry-tap non-input",
+      ]);
+    }
+
     if (type1.ok || !retryOnFail) {
       await this.humanPause(150, 400);
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 350);
@@ -984,7 +1100,7 @@ class SessionStore {
           perCharDelayMs,
           humanized: true,
           tap: tap1,
-          firstResponder: fr1,
+          firstResponder: frWait.fr,
           type_text: type1,
           retried: false,
           ok: type1.ok,
@@ -992,10 +1108,38 @@ class SessionStore {
       };
     }
 
+    // Optional single retry only when explicitly enabled and session still alive
     const tap2 = await tapTarget();
     const fr2 = await waitFirstResponder();
+    if (!fr2.canInsert) {
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
+      return {
+        ...this.actEnvelope(
+          { ok: false, reason: "retry: still no canInsertText" },
+          snapshot,
+          {
+            action: "SmartTypeTextAction",
+            ok: false,
+            code: "NOT_INPUT",
+            retried: true,
+            tap: tap1,
+            retry_tap: tap2,
+            firstResponder: frWait.fr,
+            retry_first_responder: fr2.fr,
+          },
+        ),
+        ok: false,
+      };
+    }
     await this.humanPause(200, 400);
     const type2 = await tryType();
+    if (type2.fatal) {
+      throw new ProbeError("SCRIPT_DESTROYED", type2.error, [
+        "session_respawn",
+        "wait(4000)",
+        "screen_snapshot",
+      ]);
+    }
     await this.humanPause(150, 400);
     const snapshot = await this.maybeResnapshot(opts.resnapshot, 350);
 
@@ -1006,10 +1150,10 @@ class SessionStore {
         perCharDelayMs,
         humanized: true,
         tap: tap1,
-        firstResponder: fr1,
+        firstResponder: frWait.fr,
         type_text_first: type1,
         retry_tap: tap2,
-        retry_first_responder: fr2,
+        retry_first_responder: fr2.fr,
         type_text: type2,
         retried: true,
         ok: type2.ok,
@@ -1052,8 +1196,35 @@ class SessionStore {
     return this.rpc("netStatus");
   }
 
-  async netDump(options: { limit?: number; query?: string } = {}): Promise<unknown> {
-    return this.rpc("netDump", [options]);
+  async netDump(
+    options: {
+      limit?: number;
+      query?: string;
+      /** Default true — redact secrets for open-source safety */
+      redact?: boolean;
+      /** If true, only return host counts (low noise) */
+      summaryOnly?: boolean;
+    } = {},
+  ): Promise<unknown> {
+    const { redactNetDump, summarizeNetHosts } = await import("./redact.js");
+    const raw = (await this.rpc("netDump", [
+      { limit: options.limit, query: options.query },
+    ])) as Record<string, unknown>;
+    const redact = options.redact !== false;
+    if (options.summaryOnly) {
+      const entries = Array.isArray(raw.entries) ? raw.entries : [];
+      const summary = summarizeNetHosts(entries);
+      return {
+        ok: true,
+        summaryOnly: true,
+        redacted: true,
+        enabled: raw.enabled,
+        count: raw.count,
+        ...summary,
+        note: "Host summary only. Full dump: net_dump without summaryOnly (still redacted by default).",
+      };
+    }
+    return redactNetDump(raw, redact);
   }
 }
 

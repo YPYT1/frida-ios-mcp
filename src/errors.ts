@@ -8,6 +8,7 @@ export type ErrorCode =
   | "SCRIPT_DESTROYED"
   | "STALE_REF"
   | "NO_FOCUS"
+  | "NOT_INPUT"
   | "NOT_TAPPABLE"
   | "OFF_SCREEN"
   | "BLOCKED_RPC"
@@ -91,6 +92,18 @@ export function mapError(err: unknown): {
       recovery: [
         "smart_type_text with ref or x,y of the input",
         "or tap input then type_text",
+      ],
+    };
+  }
+  if (/not_input|not an input|not a text field|composer chrome/i.test(m)) {
+    return {
+      ok: false,
+      code: "NOT_INPUT",
+      error: message,
+      recovery: [
+        "screen_snapshot search for real field (搜尋/Search/placeholder)",
+        "avoid status chips like 有什麼好事",
+        "first_responder before type_text",
       ],
     };
   }
