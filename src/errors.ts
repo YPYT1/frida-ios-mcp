@@ -6,6 +6,10 @@ export type ErrorCode =
   | "NO_SESSION"
   | "SESSION_DEAD"
   | "SCRIPT_DESTROYED"
+  | "SESSION_OPEN_TIMEOUT"
+  | "APP_LOCK_TIMEOUT"
+  | "APP_LOCK_HOLD_TIMEOUT"
+  | "APP_LOCK_RESET"
   | "STALE_REF"
   | "NO_FOCUS"
   | "NOT_INPUT"
@@ -109,6 +113,52 @@ export function mapError(err: unknown): {
       code: "NO_SESSION",
       error: message,
       recovery: ["session_open", "wait(3000-5000)", "screen_snapshot"],
+    };
+  }
+  if (/lock wait timed out|app_lock_timeout/i.test(m)) {
+    return {
+      ok: false,
+      code: "APP_LOCK_TIMEOUT",
+      error: message,
+      recovery: [
+        "session_status",
+        "session_force_unlock",
+        "retry session_open, or restart MCP process",
+      ],
+    };
+  }
+  if (/lock hold timed out|app_lock_hold_timeout/i.test(m)) {
+    return {
+      ok: false,
+      code: "APP_LOCK_HOLD_TIMEOUT",
+      error: message,
+      recovery: [
+        "session_status",
+        "session_force_unlock",
+        "retry session_open (previous close/spawn may still be running in background)",
+        "or restart MCP process",
+      ],
+    };
+  }
+  if (/force-reset|app_lock_reset/i.test(m)) {
+    return {
+      ok: false,
+      code: "APP_LOCK_RESET",
+      error: message,
+      recovery: ["session_status", "session_open"],
+    };
+  }
+  if (/session open timed out|session_open_timeout/i.test(m)) {
+    return {
+      ok: false,
+      code: "SESSION_OPEN_TIMEOUT",
+      error: message,
+      recovery: [
+        "session_force_unlock",
+        "kill leftover app on device",
+        "retry session_open",
+        "or restart MCP process",
+      ],
     };
   }
   if (/session is dead|script is destroyed|script destroyed|detached/i.test(m)) {
@@ -218,7 +268,7 @@ export const PROBE_HELP = {
       "sb_alert_trigger (force default false) → sb_alert_list (live+raw counts; raw may > live) → single dismiss post-settle | stacked/unsure: sb_alert_dismiss({all:true}) — do not trust actionViewCount===1 after force; never parallel tap+dismiss → app screen_snapshot",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
     media:
-      "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; Photos may steal foreground briefly",
+      "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; video: avoid parallel session_open other apps",
     system_alert_stack:
       "force stacks layers; list live count can undercount — always sb_alert_dismiss({all:true}) when unsure",
   },
@@ -233,6 +283,8 @@ export const PROBE_HELP = {
     ],
     host: "Photos.app only (com.apple.mobileslideshow). Never import via TikTok agent.",
     afc: "scripts/afc_tool.py; preflight ≤5s → stage=afc if pymobiledevice3 missing",
+    video:
+      "During video import, avoid parallel session_open of other Apps (Preferences/TikTok); concurrent sessions can delay Photos.sqlite visibility → needsRetry + re-list",
     env: {
       FRIDA_MCP_PYTHON:
         "Absolute path to python.exe that has pymobiledevice3 (preferred over bare 'python' on PATH)",
@@ -241,7 +293,7 @@ export const PROBE_HELP = {
       windows_cli:
         "set FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
     },
-    note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db. No auto pip install.",
+    note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db. No auto pip install. needsRetry means re-list — not silent success without asset.",
   },
   typing: {
     steps: [
@@ -270,10 +322,17 @@ export const PROBE_HELP = {
   },
   dual: {
     model: "App session (live) + SpringBoard session (sbLive) held together",
-    locks: "appLock serializes ALL app acts; sbLock separate — App+SB concurrent OK",
+    locks:
+      "appLock serializes ALL app acts; sbLock separate — App+SB concurrent OK. " +
+      "session_open holds the lock with holdTimeout (open+close budget, ~70s default) so hung Frida detach/spawn cannot pin the lock forever. " +
+      "closeLiveSession soft-times out (FRIDA_MCP_CLOSE_TIMEOUT_MS, default 5s). " +
+      "Lock wait: FRIDA_MCP_LOCK_WAIT_MS (default 90s). Spawn: FRIDA_MCP_OPEN_TIMEOUT_MS (default 60s). " +
+      "If MCP looks half-dead (device_list OK but open hangs): session_status → session_force_unlock or restart MCP. " +
+      "Cursor cancel does NOT abort server-side Frida; hold timeout / force_unlock recovers.",
     open: "session_open({ withSpringBoard: true }) or sb_ensure",
     prove: "dual_ping",
     close: "session_close closes both by default; closeSpringBoard:false keeps SB intentionally",
+    recover: "session_force_unlock — resets appLock/sbLock + best-effort detach (orphanFridaOpPossible)",
     photos:
       "photosLock side channel (Photos.app) independent of App/SB; photos_* does not destroy TikTok session",
   },
@@ -281,6 +340,8 @@ export const PROBE_HELP = {
     mcp_embedded: "Each MCP process has its own sessionStore (not shared with CLI)",
     cli: "CLI is another process — cannot see MCP session unless daemon mode",
     share: "Run daemon; set FRIDA_MCP_MODE=daemon on both MCP and CLI",
+    stuck:
+      "CLI can open while MCP is stuck because they are different Node processes / different locks",
   },
   search: {
     default: "substring",

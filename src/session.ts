@@ -1,9 +1,13 @@
 import {
   closeLiveSession,
   callRpc,
+  closeTimeoutMs,
+  lockWaitTimeoutMs,
   openAttachByProcessName,
   openAttachSession,
   openSpawnSession,
+  openTimeoutMs,
+  sessionOpenHoldTimeoutMs,
   type LiveSession,
 } from "./frida/device.js";
 import {
@@ -24,7 +28,7 @@ import {
   type TextNode,
 } from "./snapshot.js";
 import { ProbeError } from "./errors.js";
-import { AsyncMutex } from "./mutex.js";
+import { AsyncMutex, type MutexStatus } from "./mutex.js";
 import { photosChannel } from "./photos.js";
 
 export type SessionStatus = {
@@ -53,6 +57,15 @@ export type SessionStatus = {
   /** Photos.app side channel (import/clear) — independent of app/SB */
   photosAlive?: boolean;
   photosPid?: number;
+  /** appLock observability (no lock taken) */
+  appLockBusy?: boolean;
+  appLockWaiters?: number;
+  appLockBusyOp?: string | null;
+  appLockBusySinceMs?: number;
+  sbLockBusy?: boolean;
+  sbLockWaiters?: number;
+  sbLockBusyOp?: string | null;
+  orphanFridaOpPossible?: boolean;
 };
 
 export type SnapshotRequest = SnapshotFormatOpts & {
@@ -81,6 +94,49 @@ class SessionStore {
    */
   private readonly appLock = new AsyncMutex();
   private readonly sbLock = new AsyncMutex();
+  /** Set after forceUnlock / open timeout — native Frida may still be running. */
+  private orphanFridaOpPossible = false;
+
+  private lockFields(): Pick<
+    SessionStatus,
+    | "appLockBusy"
+    | "appLockWaiters"
+    | "appLockBusyOp"
+    | "appLockBusySinceMs"
+    | "sbLockBusy"
+    | "sbLockWaiters"
+    | "sbLockBusyOp"
+    | "orphanFridaOpPossible"
+  > {
+    const app = this.appLock.status();
+    const sb = this.sbLock.status();
+    return {
+      appLockBusy: app.busy,
+      appLockWaiters: app.waiters,
+      appLockBusyOp: app.busyOp,
+      appLockBusySinceMs: app.busySinceMs,
+      sbLockBusy: sb.busy,
+      sbLockWaiters: sb.waiters,
+      sbLockBusyOp: sb.busyOp,
+      orphanFridaOpPossible: this.orphanFridaOpPossible || undefined,
+    };
+  }
+
+  private lockHint(app: MutexStatus): { hint?: string; recovery?: string[] } {
+    if (!app.busy) return {};
+    const stuck =
+      app.busySinceMs >= Math.min(openTimeoutMs(), 30_000)
+        ? " Prefer session_force_unlock now."
+        : "";
+    return {
+      hint: `appLock busy (op=${app.busyOp ?? "?"}, since ${app.busySinceMs}ms, waiters=${app.waiters}). Cursor cancel does not abort server Frida.${stuck}`,
+      recovery: [
+        "session_force_unlock",
+        "or wait for APP_LOCK_HOLD_TIMEOUT / SESSION_OPEN_TIMEOUT",
+        "or restart MCP process",
+      ],
+    };
+  }
 
   /** Default snapshot opts for auto-resnapshot after acts */
   static readonly DEFAULT_SNAP: SnapshotFormatOpts = {
@@ -89,6 +145,8 @@ class SessionStore {
   };
 
   status(): SessionStatus {
+    const locks = this.lockFields();
+    const lockHint = this.lockHint(this.appLock.status());
     if (!this.live) {
       const sbAlive = !!this.sbLive?.alive;
       const intentionalKeep = sbAlive && this.sbKeepIntentional;
@@ -104,16 +162,21 @@ class SessionStore {
         dualParallel: true,
         photosAlive: ph.photosAlive,
         photosPid: ph.photosPid,
-        hint: intentionalKeep
-          ? "SpringBoard kept intentionally; call sb_close when done."
-          : sbAlive
-            ? "App session ended but SpringBoard still attached unexpectedly. Call sb_close."
-            : undefined,
-        recovery: sbAlive
-          ? intentionalKeep
-            ? ["sb_close when finished", "or session_open for a new app"]
-            : ["sb_close", "session_open"]
-          : ["session_open", "wait(3000-5000)", "screen_snapshot"],
+        ...locks,
+        hint:
+          lockHint.hint ??
+          (intentionalKeep
+            ? "SpringBoard kept intentionally; call sb_close when done."
+            : sbAlive
+              ? "App session ended but SpringBoard still attached unexpectedly. Call sb_close."
+              : undefined),
+        recovery:
+          lockHint.recovery ??
+          (sbAlive
+            ? intentionalKeep
+              ? ["sb_close when finished", "or session_open for a new app"]
+              : ["sb_close", "session_open"]
+            : ["session_open", "wait(3000-5000)", "screen_snapshot"]),
       };
     }
     const alive = this.live.alive;
@@ -138,14 +201,19 @@ class SessionStore {
       dualParallel: true,
       photosAlive: ph.photosAlive,
       photosPid: ph.photosPid,
-      hint: !alive
-        ? "Session script is dead. Call session_respawn or session_open."
-        : isTikTokBundle(this.live.bundleId)
-          ? TIKTOK_WAIT_HINT
-          : undefined,
-      recovery: !alive
-        ? ["session_respawn", "wait(4000)", "screen_snapshot", "note: spawn may reset login UI"]
-        : undefined,
+      ...locks,
+      hint:
+        lockHint.hint ??
+        (!alive
+          ? "Session script is dead. Call session_respawn or session_open."
+          : isTikTokBundle(this.live.bundleId)
+            ? TIKTOK_WAIT_HINT
+            : undefined),
+      recovery:
+        lockHint.recovery ??
+        (!alive
+          ? ["session_respawn", "wait(4000)", "screen_snapshot", "note: spawn may reset login UI"]
+          : undefined),
     };
   }
 
@@ -177,18 +245,45 @@ class SessionStore {
 
   private appSessionBrief() {
     const s = this.status();
+    const hasLiveRefs = !!this.snapshot;
     return {
       alive: !!s.alive,
       open: s.open,
       bundleId: s.bundleId,
-      /** Current in-memory ref table valid */
-      hasSnapshot: !!this.snapshot,
+      /** Current in-memory ref table is valid for tap/type */
+      hasSnapshot: hasLiveRefs,
+      refsValid: hasLiveRefs,
       /** Last completed snapshot gen (may be stale after act cleared refs) */
       lastSnapshotGeneration:
         this.snapshot?.generation ?? this.lastSnapMeta?.generation,
       snapshotStale: !this.snapshot && !!this.lastSnapMeta,
       snapshotGeneration: s.snapshotGeneration,
+      note: !hasLiveRefs && this.lastSnapMeta
+        ? "refs cleared/stale — call screen_snapshot before tap(ref)"
+        : undefined,
     };
+  }
+
+  /** Drop app session pointers then timed detach (caller must hold appLock or be forceUnlock). */
+  private async detachAppSessionUnlocked(): Promise<{ closeTimedOut: boolean }> {
+    const live = this.live;
+    this.live = null;
+    this.snapshot = null;
+    this.prevSnapshot = null;
+    this.lastTreeText = null;
+    this.lastSnapMeta = null;
+    const r = await closeLiveSession(live);
+    if (r.timedOut) this.orphanFridaOpPossible = true;
+    return { closeTimedOut: r.timedOut };
+  }
+
+  private async detachSbSessionUnlocked(): Promise<{ closeTimedOut: boolean }> {
+    const sb = this.sbLive;
+    this.sbLive = null;
+    this.sbKeepIntentional = false;
+    const r = await closeLiveSession(sb);
+    if (r.timedOut) this.orphanFridaOpPossible = true;
+    return { closeTimedOut: r.timedOut };
   }
 
   /** After UI act: optional auto screen_snapshot (default true). */
@@ -244,16 +339,12 @@ class SessionStore {
       springboard?: unknown;
     }
   > {
-    await this.appLock.run(async () => {
-      await this.close();
-    });
     const bundleId = opts.bundleId;
     const warnings: string[] = [];
     let net: unknown;
     let springboard: unknown;
 
     // --- Spawn-only policy (this device stack) ---
-    // Default always spawn. attach only if FRIDA_MCP_ALLOW_ATTACH=1.
     let mode: "spawn" | "attach" = "spawn";
     if (opts.mode === "attach") {
       if (attachAllowed()) {
@@ -271,67 +362,113 @@ class SessionStore {
       mode = "spawn";
     }
 
-    // Optionally start SpringBoard attach in parallel with app spawn
-    const sbPromise =
-      opts.withSpringBoard === true
-        ? this.ensureSpringBoard(opts.udid)
-            .then((sb) => ({
-              ok: true as const,
-              pid: sb.pid,
-              process: "SpringBoard",
-              mode: "attach" as const,
-            }))
-            .catch((e: unknown) => ({
-              ok: false as const,
-              error: e instanceof Error ? e.message : String(e),
-            }))
-        : null;
+    const openMs = openTimeoutMs();
+    const holdMs = sessionOpenHoldTimeoutMs();
+    const wantSb = opts.withSpringBoard === true;
 
-    await this.appLock.run(async () => {
-      if (mode === "spawn") {
-        this.live = await openSpawnSession({
-          udid: opts.udid,
-          bundleId,
-          beforeResume: opts.captureNet
-            ? async (script) => {
-                net = await callRpc(script, "netEnable", [
-                  {
-                    captureResponse: false,
-                    maxBody: 2048,
-                    ...(opts.netOptions ?? {}),
-                  },
-                ]);
-              }
-            : undefined,
-        });
-        warnings.push(
-          "session opened with spawn (kill → inject while suspended → resume). touchReliable=true.",
-        );
-        warnings.push(
-          "spawn restarts the app process (in-memory UI / some login UI state may reset).",
-        );
-      } else {
-        this.live = await openAttachSession({ udid: opts.udid, bundleId });
-        if (opts.captureNet) {
-          net = await callRpc(this.live.script, "netEnable", [
-            {
-              captureResponse: false,
-              maxBody: 2048,
-              ...(opts.netOptions ?? {}),
-            },
-          ]);
-          warnings.push(
-            "captureNet on attach enables hooks late — launch traffic already missed.",
-          );
-        }
+    // Started inside appLock after soft-close so we don't race-kill a parallel attach
+    let sbPromise: Promise<
+      | { ok: true; pid: number; process: string; mode: "attach" }
+      | { ok: false; error: string }
+    > | null = null;
+
+    try {
+      await this.appLock.run(
+        async () => {
+          const appClose = await this.detachAppSessionUnlocked();
+          if (appClose.closeTimedOut) {
+            warnings.push(
+              `previous app session close timed out after ${closeTimeoutMs()}ms — continued open (orphanFridaOpPossible).`,
+            );
+          }
+          const sbClose = await this.detachSbSessionUnlocked();
+          if (sbClose.closeTimedOut) {
+            warnings.push(
+              `previous SpringBoard close timed out after ${closeTimeoutMs()}ms — continued.`,
+            );
+          }
+
+          // Attach SB in parallel with spawn (separate sbLock)
+          if (wantSb) {
+            sbPromise = this.ensureSpringBoard(opts.udid)
+              .then((sb) => ({
+                ok: true as const,
+                pid: sb.pid,
+                process: "SpringBoard",
+                mode: "attach" as const,
+              }))
+              .catch((e: unknown) => ({
+                ok: false as const,
+                error: e instanceof Error ? e.message : String(e),
+              }));
+          }
+
+          if (mode === "spawn") {
+            this.live = await openSpawnSession({
+              udid: opts.udid,
+              bundleId,
+              timeoutMs: openMs,
+              beforeResume: opts.captureNet
+                ? async (script) => {
+                    net = await callRpc(script, "netEnable", [
+                      {
+                        captureResponse: false,
+                        maxBody: 2048,
+                        ...(opts.netOptions ?? {}),
+                      },
+                    ]);
+                  }
+                : undefined,
+            });
+            warnings.push(
+              "session opened with spawn (kill → inject while suspended → resume). touchReliable=true.",
+            );
+            warnings.push(
+              "spawn restarts the app process (in-memory UI / some login UI state may reset).",
+            );
+          } else {
+            this.live = await openAttachSession({
+              udid: opts.udid,
+              bundleId,
+              timeoutMs: openMs,
+            });
+            if (opts.captureNet) {
+              net = await callRpc(this.live.script, "netEnable", [
+                {
+                  captureResponse: false,
+                  maxBody: 2048,
+                  ...(opts.netOptions ?? {}),
+                },
+              ]);
+              warnings.push(
+                "captureNet on attach enables hooks late — launch traffic already missed.",
+              );
+            }
+          }
+
+          this.live.onDead = (reason) => {
+            this.markDead(reason);
+            this.snapshot = null;
+            console.error(`[frida-mcp] session dead: ${reason}`);
+          };
+        },
+        {
+          waitTimeoutMs: lockWaitTimeoutMs(),
+          holdTimeoutMs: holdMs,
+          op: "session_open",
+        },
+      );
+    } catch (e) {
+      if (
+        e instanceof ProbeError &&
+        (e.code === "SESSION_OPEN_TIMEOUT" ||
+          e.code === "APP_LOCK_HOLD_TIMEOUT" ||
+          e.code === "APP_LOCK_RESET")
+      ) {
+        this.orphanFridaOpPossible = true;
       }
-
-      this.live.onDead = (reason) => {
-        this.markDead(reason);
-        this.snapshot = null;
-        console.error(`[frida-mcp] session dead: ${reason}`);
-      };
-    });
+      throw e;
+    }
 
     if (sbPromise) {
       springboard = await sbPromise;
@@ -355,6 +492,7 @@ class SessionStore {
       );
     }
 
+    this.orphanFridaOpPossible = false;
     return {
       ...this.status(),
       warnings,
@@ -385,17 +523,21 @@ class SessionStore {
     springboardAlive: boolean;
     springboardKept?: boolean;
     hint?: string;
+    closeTimedOut?: boolean;
   }> {
     const closeSb = opts.closeSpringBoard !== false;
-    await this.appLock.run(async () => {
-      const live = this.live;
-      this.live = null;
-      this.snapshot = null;
-      this.prevSnapshot = null;
-      this.lastTreeText = null;
-      this.lastSnapMeta = null;
-      await closeLiveSession(live);
-    });
+    let closeTimedOut = false;
+    await this.appLock.run(
+      async () => {
+        const r = await this.detachAppSessionUnlocked();
+        closeTimedOut = r.closeTimedOut;
+      },
+      {
+        waitTimeoutMs: lockWaitTimeoutMs(),
+        holdTimeoutMs: closeTimeoutMs() + 2_000,
+        op: "session_close",
+      },
+    );
     let springboardClosed = false;
     if (closeSb) {
       this.sbKeepIntentional = false;
@@ -405,6 +547,7 @@ class SessionStore {
         appClosed: true,
         springboardClosed: true,
         springboardAlive: false,
+        closeTimedOut: closeTimedOut || undefined,
         hint: "App and SpringBoard sessions closed.",
       };
     }
@@ -414,6 +557,7 @@ class SessionStore {
       springboardClosed: false,
       springboardAlive: !!this.sbLive?.alive,
       springboardKept: this.sbKeepIntentional,
+      closeTimedOut: closeTimedOut || undefined,
       hint: this.sbKeepIntentional
         ? "SpringBoard kept intentionally; call sb_close when done."
         : "App closed; SpringBoard was not attached.",
@@ -421,17 +565,57 @@ class SessionStore {
   }
 
   async sbClose(): Promise<void> {
-    await this.sbLock.run(async () => {
-      const sb = this.sbLive;
-      this.sbLive = null;
-      this.sbKeepIntentional = false;
-      await closeLiveSession(sb);
-    });
+    await this.sbLock.run(
+      async () => {
+        await this.detachSbSessionUnlocked();
+      },
+      {
+        waitTimeoutMs: lockWaitTimeoutMs(),
+        holdTimeoutMs: closeTimeoutMs() + 2_000,
+        op: "sb_close",
+      },
+    );
+  }
+
+  /**
+   * Emergency recovery when appLock is stuck (hung Frida / Cursor cancel).
+   * Does not wait on locks — force-resets then best-effort timed detach.
+   */
+  async forceUnlock(): Promise<{
+    ok: true;
+    before: SessionStatus;
+    after: SessionStatus;
+    appReset: ReturnType<AsyncMutex["forceReset"]>;
+    sbReset: ReturnType<AsyncMutex["forceReset"]>;
+    orphanFridaOpPossible: true;
+    hint: string;
+  }> {
+    const before = this.status();
+    const appReset = this.appLock.forceReset();
+    const sbReset = this.sbLock.forceReset();
+    this.orphanFridaOpPossible = true;
+
+    await this.detachAppSessionUnlocked();
+    await this.detachSbSessionUnlocked();
+
+    return {
+      ok: true as const,
+      before,
+      after: this.status(),
+      appReset,
+      sbReset,
+      orphanFridaOpPossible: true as const,
+      hint:
+        "Locks reset and sessions detached best-effort. A native Frida call may still be running in background — if device acts oddly, restart MCP.",
+    };
   }
 
   /** Entire app-session op under one lock (serializes AI parallel tap/swipe). */
-  private withAppOp<T>(fn: () => Promise<T>): Promise<T> {
-    return this.appLock.run(fn);
+  private withAppOp<T>(fn: () => Promise<T>, op = "app_op"): Promise<T> {
+    return this.appLock.run(fn, {
+      waitTimeoutMs: lockWaitTimeoutMs(),
+      op,
+    });
   }
 
   async ping(): Promise<string> {
@@ -781,26 +965,32 @@ class SessionStore {
   }
 
   private async ensureSpringBoard(udid?: string): Promise<LiveSession> {
-    return this.sbLock.run(() => this.ensureSpringBoardUnlocked(udid));
+    return this.sbLock.run(() => this.ensureSpringBoardUnlocked(udid), {
+      waitTimeoutMs: lockWaitTimeoutMs(),
+      op: "sb_ensure",
+    });
   }
 
   private async sbRpc(name: string, args: unknown[] = []): Promise<unknown> {
-    return this.sbLock.run(async () => {
-      const sb = await this.ensureSpringBoardUnlocked();
-      if (!sb.alive) {
-        throw new Error("SpringBoard session dead. Retry sb_alert_list.");
-      }
-      try {
-        return await callRpc(sb.script, name, args);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/script is destroyed|detached/i.test(msg)) {
-          this.sbLive = null;
-          throw new Error(`${msg}. SpringBoard session lost — retry sb_alert_list.`);
+    return this.sbLock.run(
+      async () => {
+        const sb = await this.ensureSpringBoardUnlocked();
+        if (!sb.alive) {
+          throw new Error("SpringBoard session dead. Retry sb_alert_list.");
         }
-        throw e;
-      }
-    });
+        try {
+          return await callRpc(sb.script, name, args);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/script is destroyed|detached/i.test(msg)) {
+            this.sbLive = null;
+            throw new Error(`${msg}. SpringBoard session lost — retry sb_alert_list.`);
+          }
+          throw e;
+        }
+      },
+      { waitTimeoutMs: lockWaitTimeoutMs(), op: `sb:${name}` },
+    );
   }
 
   /** Warm SpringBoard inject without listing alerts (parallel with app work). */

@@ -75,6 +75,11 @@ export async function handleMethod(
           count: list.length,
           apps: list,
           filters: { runningOnly, userFacing, query: query ?? null },
+          ...(query && query.includes("|")
+            ? {
+                warn: "app_list query is substring only (not regex). Use query:\"TikTok\" or query:\"Ame\", not a|b.",
+              }
+            : {}),
         });
       }
       case "process_list": {
@@ -136,6 +141,10 @@ export async function handleMethod(
           ...r,
           status: sessionStore.status(),
         });
+      }
+      case "session_force_unlock": {
+        const r = await sessionStore.forceUnlock();
+        return jsonResult(r);
       }
       case "sb_alert_trigger": {
         const r = await sessionStore.sbAlertTrigger({

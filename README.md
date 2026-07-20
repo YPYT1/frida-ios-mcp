@@ -43,6 +43,16 @@ kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject age
 | SpringBoard | `sbLive` | `sbLock` | `withSpringBoard:true` / `sb_ensure` / first `sb_*` |
 | Photos album | `photosLive` | `photosLock` | `photos_ensure` / `photos_import_file` |
 
+**Stuck open / half-dead MCP:** Cursor cancel does **not** abort server-side Frida. If `device_list` works but `session_open` / `ping` hang forever, check `session_status` (`appLockBusy`, `appLockWaiters`), then call `session_force_unlock` or restart the MCP process. CLI can still open apps because it is a **different Node process** with its own locks.
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `FRIDA_MCP_OPEN_TIMEOUT_MS` | `60000` | spawn/attach/inject total timeout |
+| `FRIDA_MCP_CLOSE_TIMEOUT_MS` | `5000` | soft timeout for script unload/detach (won't pin the lock) |
+| `FRIDA_MCP_LOCK_WAIT_MS` | `90000` | max wait to acquire appLock/sbLock |
+
+`session_open` also has a **hold timeout** (~open+close+5s): if Frida close/spawn hangs but the event loop is alive, the lock is released with `APP_LOCK_HOLD_TIMEOUT` instead of pinning forever.
+
 - **Held in parallel** — App + SB Frida scripts; Photos is a temporary third channel.
 - **RPCs concurrent** — separate locks; `dual_ping` / `Promise.all([app…, sb…])` run together.
 - **Not multi-app business** — one app + SpringBoard; Photos is import/clear only.
@@ -78,11 +88,13 @@ Cursor / Claude MCP config example:
 ```
 
 ```bash
-# image or small mp4 (video path)
+# image or small mp4 (prefer no other session_open during video import)
 pnpm cli call photos_import_file --localPath D:\path\to\clip.mp4 --mediaType video
 pnpm cli call photos_list --mediaType video
 pnpm cli call photos_clear
 ```
+
+**Video tip:** concurrent App sessions (e.g. Preferences open via `session_open`) can delay sqlite verify → `needsRetry:true` with a valid `localIdentifier`. Close other sessions and `photos_list` / re-import; do not treat needsRetry as silent success.
 
 | Tool | Role |
 |------|------|
@@ -91,7 +103,7 @@ pnpm cli call photos_clear
 | `photos_list` | Untrashed assets; optional `mediaType` / `idPrefix` |
 | `photos_clear` | Trash untrashed media (Recently Deleted), optional DCIM cleanup |
 
-AFC helper: `scripts/afc_tool.py` (`preflight` / push / list-untrashed / rm-dcim). Host = **Photos.app** only.
+AFC helper: `scripts/afc_tool.py` (`preflight` / push / list-untrashed / rm-dcim). Host = **Photos.app** only. SQLite query aligns with fleetcontrol (`ZKIND in (0,1,2)` + extensions).
 
 ```text
 session_open { bundleId: TikTok, withSpringBoard: true }
@@ -220,7 +232,7 @@ FRIDA_MCP_MODE = "daemon"
 | `device_list` | Frida devices (default USB-only; `usbOnly=false` for all) |
 | `app_list` | Apps + pid. Default `userFacing=true` filters Apple services; `runningOnly` / `query` supported |
 | `session_open` | spawn \| attach + inject |
-| `session_status` / `session_respawn` / `session_close` | lifecycle (`alive` flag tracks script death) |
+| `session_status` / `session_respawn` / `session_close` / `session_force_unlock` | lifecycle + stuck-lock recovery (`appLockBusy`) |
 | `ping` | agent liveness |
 | `screen_window` | simplified `{width,height,x,y,cx,cy,className}` |
 | `screen_snapshot` / `screen_search` | texts refs are generation-scoped (`g3t8`); tree mode does not wipe texts refs |

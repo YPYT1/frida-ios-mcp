@@ -124,7 +124,7 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "session_status",
-    "Session health: alive, touchReliable, deadReason, recovery[], loginStateRisk, springboardAlive, snapshotGeneration.",
+    "Session health: alive, touchReliable, deadReason, recovery[], loginStateRisk, springboardAlive, snapshotGeneration, appLockBusy/waiters (diagnose stuck open).",
     {},
     async () => toolResult(await run("session_status")),
   );
@@ -147,6 +147,13 @@ export function createMcpServer(): McpServer {
     },
     async ({ closeSpringBoard }) =>
       toolResult(await run("session_close", { closeSpringBoard })),
+  );
+
+  server.tool(
+    "session_force_unlock",
+    "Emergency: reset stuck appLock/sbLock and best-effort detach sessions. Use when device_list works but session_open/ping hang (Cursor cancel does not abort server Frida). May leave orphanFridaOpPossible.",
+    {},
+    async () => toolResult(await run("session_force_unlock")),
   );
 
   server.tool(
@@ -558,7 +565,7 @@ export function createMcpServer(): McpServer {
     [
       "One-shot: AFC upload + Photos ensure + PhotoKit import + optional sqlite verify. Preferred for AI.",
       "Needs FRIDA_MCP_PYTHON with pymobiledevice3 (no auto pip). Missing deps → stage=afc in ≤5s.",
-      "Accepts image or small mp4 (mediaType=video).",
+      "Accepts image or small mp4 (mediaType=video). Video: avoid parallel session_open other apps or expect needsRetry + photos_list.",
     ].join(" "),
     {
       udid: z.string().optional(),

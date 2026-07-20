@@ -1,5 +1,6 @@
 import frida from "frida";
 import { compileAgent, waitForReady } from "./agent.js";
+import { ProbeError } from "../errors.js";
 
 export type DeviceInfo = {
   id: string;
@@ -12,6 +13,84 @@ export type AppInfo = {
   name: string;
   pid: number;
 };
+
+/** Default 60s — override with FRIDA_MCP_OPEN_TIMEOUT_MS */
+export function openTimeoutMs(): number {
+  const n = Number(process.env.FRIDA_MCP_OPEN_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60_000;
+}
+
+/** Default 90s — override with FRIDA_MCP_LOCK_WAIT_MS */
+export function lockWaitTimeoutMs(): number {
+  const n = Number(process.env.FRIDA_MCP_LOCK_WAIT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 90_000;
+}
+
+/** Default 5s — unload/detach must not hold appLock forever */
+export function closeTimeoutMs(): number {
+  const n = Number(process.env.FRIDA_MCP_CLOSE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5_000;
+}
+
+/** Wall clock for whole session_open critical section (close + spawn). */
+export function sessionOpenHoldTimeoutMs(): number {
+  return openTimeoutMs() + closeTimeoutMs() + 5_000;
+}
+
+async function raceTimeout<T>(
+  work: Promise<T>,
+  ms: number,
+  onTimeout: () => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          onTimeout();
+          reject(
+            new ProbeError(
+              "SESSION_OPEN_TIMEOUT",
+              `session open timed out after ${ms}ms (spawn/attach/inject). Lock will release; Frida may still be cleaning up in background.`,
+              [
+                "session_force_unlock",
+                "kill leftover app on device if needed",
+                "retry session_open",
+                "or restart MCP process",
+              ],
+            ),
+          );
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function bestEffortCleanup(partial: {
+  device?: frida.Device;
+  session?: frida.Session;
+  script?: frida.Script;
+  pid?: number;
+}): Promise<void> {
+  try {
+    if (partial.script) await partial.script.unload();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (partial.session) await partial.session.detach();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (partial.device && partial.pid) await partial.device.kill(partial.pid);
+  } catch {
+    /* ignore */
+  }
+}
 
 export async function listDevices(): Promise<DeviceInfo[]> {
   const dm = await frida.getDeviceManager();
@@ -200,116 +279,225 @@ export async function openSpawnSession(opts: {
   bundleId: string;
   /** Run while process is still suspended (after agent ready). Ideal for netEnable. */
   beforeResume?: (script: frida.Script) => Promise<void>;
+  /** Override FRIDA_MCP_OPEN_TIMEOUT_MS */
+  timeoutMs?: number;
 }): Promise<LiveSession> {
-  const device = await getDevice(opts.udid);
-  const udid = device.id;
-  // Kill existing then spawn suspended
-  try {
-    const apps = await device.enumerateApplications();
-    const hit = apps.find((a) => a.identifier === opts.bundleId && a.pid);
-    if (hit?.pid) {
-      try {
-        await device.kill(hit.pid);
-      } catch {
-        /* ignore */
+  const timeoutMs = opts.timeoutMs ?? openTimeoutMs();
+  const cancelled = { value: false };
+  const partial: {
+    device?: frida.Device;
+    session?: frida.Session;
+    script?: frida.Script;
+    pid?: number;
+  } = {};
+
+  const work = async (): Promise<LiveSession> => {
+    const device = await getDevice(opts.udid);
+    if (cancelled.value) throw new Error("session open cancelled");
+    partial.device = device;
+    const udid = device.id;
+    // Kill existing then spawn suspended
+    try {
+      const apps = await device.enumerateApplications();
+      const hit = apps.find((a) => a.identifier === opts.bundleId && a.pid);
+      if (hit?.pid) {
+        try {
+          await device.kill(hit.pid);
+        } catch {
+          /* ignore */
+        }
       }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
-  }
+    if (cancelled.value) throw new Error("session open cancelled");
 
-  const pid = await device.spawn([opts.bundleId]);
-  const session = await device.attach(pid);
-  const code = await compileAgent();
-  const script = await session.createScript(code);
-  const ready = waitForReady(script, 8000);
-  await script.load();
-  await ready;
-  // Hooks installed here catch launch-time traffic after resume
-  if (opts.beforeResume) {
-    await opts.beforeResume(script);
-  }
-  await device.resume(pid);
+    const pid = await device.spawn([opts.bundleId]);
+    partial.pid = pid;
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
 
-  const live: LiveSession = {
-    device,
-    session,
-    script,
-    pid,
-    udid,
-    bundleId: opts.bundleId,
-    mode: "spawn",
-    touchReliable: true,
-    alive: true,
+    const session = await device.attach(pid);
+    partial.session = session;
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
+
+    const code = await compileAgent();
+    const script = await session.createScript(code);
+    partial.script = script;
+    const ready = waitForReady(script, 8000);
+    await script.load();
+    await ready;
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
+    // Hooks installed here catch launch-time traffic after resume
+    if (opts.beforeResume) {
+      await opts.beforeResume(script);
+    }
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
+    await device.resume(pid);
+
+    const live: LiveSession = {
+      device,
+      session,
+      script,
+      pid,
+      udid,
+      bundleId: opts.bundleId,
+      mode: "spawn",
+      touchReliable: true,
+      alive: true,
+    };
+    wireLifecycle(live);
+    return live;
   };
-  wireLifecycle(live);
-  return live;
+
+  try {
+    return await raceTimeout(work(), timeoutMs, () => {
+      cancelled.value = true;
+      void bestEffortCleanup(partial);
+    });
+  } catch (e) {
+    cancelled.value = true;
+    await bestEffortCleanup(partial);
+    throw e;
+  }
 }
 
 export async function openAttachSession(opts: {
   udid?: string;
   bundleId: string;
+  timeoutMs?: number;
 }): Promise<LiveSession> {
-  const device = await getDevice(opts.udid);
-  const udid = device.id;
-  const apps = await device.enumerateApplications();
-  const hit = apps.find((a) => a.identifier === opts.bundleId);
-  if (!hit) {
-    throw new Error(`App not installed: ${opts.bundleId}`);
-  }
-  let pid = hit.pid ?? 0;
-  if (!pid) {
-    // try process list by identifier
-    const procs = await device.enumerateProcesses();
-    const p = procs.find(
-      (x) =>
-        x.name === hit.name ||
-        (x as { parameters?: { path?: string } }).parameters?.path?.includes(
-          opts.bundleId,
-        ),
-    );
-    if (p) pid = p.pid;
-  }
-  if (!pid) {
-    throw new Error(
-      `App not running: ${opts.bundleId}. Launch it first, or use mode=spawn.`,
-    );
-  }
-  const session = await device.attach(pid);
-  const code = await compileAgent();
-  const script = await session.createScript(code);
-  const ready = waitForReady(script, 8000);
-  await script.load();
-  await ready;
+  const timeoutMs = opts.timeoutMs ?? openTimeoutMs();
+  const cancelled = { value: false };
+  const partial: {
+    device?: frida.Device;
+    session?: frida.Session;
+    script?: frida.Script;
+    pid?: number;
+  } = {};
 
-  const live: LiveSession = {
-    device,
-    session,
-    script,
-    pid,
-    udid,
-    bundleId: opts.bundleId,
-    mode: "attach",
-    touchReliable: false,
-    alive: true,
+  const work = async (): Promise<LiveSession> => {
+    const device = await getDevice(opts.udid);
+    if (cancelled.value) throw new Error("session open cancelled");
+    partial.device = device;
+    const udid = device.id;
+    const apps = await device.enumerateApplications();
+    const hit = apps.find((a) => a.identifier === opts.bundleId);
+    if (!hit) {
+      throw new Error(`App not installed: ${opts.bundleId}`);
+    }
+    let pid = hit.pid ?? 0;
+    if (!pid) {
+      const procs = await device.enumerateProcesses();
+      const p = procs.find(
+        (x) =>
+          x.name === hit.name ||
+          (x as { parameters?: { path?: string } }).parameters?.path?.includes(
+            opts.bundleId,
+          ),
+      );
+      if (p) pid = p.pid;
+    }
+    if (!pid) {
+      throw new Error(
+        `App not running: ${opts.bundleId}. Launch it first, or use mode=spawn.`,
+      );
+    }
+    if (cancelled.value) throw new Error("session open cancelled");
+    const session = await device.attach(pid);
+    partial.session = session;
+    partial.pid = pid;
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
+    const code = await compileAgent();
+    const script = await session.createScript(code);
+    partial.script = script;
+    const ready = waitForReady(script, 8000);
+    await script.load();
+    await ready;
+    if (cancelled.value) {
+      await bestEffortCleanup(partial);
+      throw new Error("session open cancelled");
+    }
+
+    const live: LiveSession = {
+      device,
+      session,
+      script,
+      pid,
+      udid,
+      bundleId: opts.bundleId,
+      mode: "attach",
+      touchReliable: false,
+      alive: true,
+    };
+    wireLifecycle(live);
+    return live;
   };
-  wireLifecycle(live);
-  return live;
+
+  try {
+    return await raceTimeout(work(), timeoutMs, () => {
+      cancelled.value = true;
+      void bestEffortCleanup(partial);
+    });
+  } catch (e) {
+    cancelled.value = true;
+    await bestEffortCleanup(partial);
+    throw e;
+  }
 }
 
-export async function closeLiveSession(live: LiveSession | null): Promise<void> {
-  if (!live) return;
+export async function closeLiveSession(
+  live: LiveSession | null,
+  timeoutMs = closeTimeoutMs(),
+): Promise<{ timedOut: boolean }> {
+  if (!live) return { timedOut: false };
   live.alive = false;
+  let timedOut = false;
+  const cleanup = (async () => {
+    try {
+      await live.script.unload();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await live.session.detach();
+    } catch {
+      /* ignore */
+    }
+  })();
   try {
-    await live.script.unload();
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, timeoutMs);
+      }),
+    ]);
   } catch {
     /* ignore */
   }
-  try {
-    await live.session.detach();
-  } catch {
-    /* ignore */
+  if (timedOut) {
+    console.error(
+      `[frida-mcp] closeLiveSession timed out after ${timeoutMs}ms (bundle=${live.bundleId}, pid=${live.pid}) — abandoned detach`,
+    );
   }
+  return { timedOut };
 }
 
 /** Attach Frida to a process by name (e.g. SpringBoard). Not for TikTok apps. */

@@ -159,13 +159,15 @@ def cmd_push(args: argparse.Namespace) -> None:
 
 
 def _query_untrashed(db_path: Path) -> list[dict[str, Any]]:
+    # Aligned with fleetcontrol IOSPhotoImportService._query_untrashed_media_assets
+    # ZKIND: 0=photo, 1/2=video-ish; keep filename OR as fallback.
     sql = """
         select ZUUID, ZFILENAME, ZDIRECTORY, Z_PK, ZKIND
         from ZASSET
         where ifnull(ZTRASHEDSTATE, 0) = 0
           and ZUUID is not null
           and (
-            ZKIND in (0, 1)
+            ZKIND in (0, 1, 2)
             or upper(ifnull(ZFILENAME, '')) like '%.MP4'
             or upper(ifnull(ZFILENAME, '')) like '%.MOV'
             or upper(ifnull(ZFILENAME, '')) like '%.M4V'
@@ -186,8 +188,9 @@ def _query_untrashed(db_path: Path) -> list[dict[str, Any]]:
     assets = []
     for zuuid, filename, directory, pk, zkind in rows:
         name = (filename or "").upper()
+        # fleetcontrol: ZKIND in (1, 2) OR video extensions → video
         is_video = (
-            zkind == 1
+            zkind in (1, 2)
             or name.endswith(".MP4")
             or name.endswith(".MOV")
             or name.endswith(".M4V")
@@ -200,6 +203,7 @@ def _query_untrashed(db_path: Path) -> list[dict[str, Any]]:
                 "directory": directory,
                 "pk": pk,
                 "mediaType": "video" if is_video else "image",
+                "zkind": zkind,
             }
         )
     return assets

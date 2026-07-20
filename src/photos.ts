@@ -386,6 +386,40 @@ export async function photosList(
   };
 }
 
+/** True when MCP already holds a live non-Photos app session (can slow sqlite verify). */
+async function appSessionConflictHint(): Promise<{
+  appSessionOpen: boolean;
+  bundleId?: string;
+}> {
+  try {
+    const { sessionStore } = await import("./session.js");
+    const s = sessionStore.status();
+    if (s.open && s.alive && s.bundleId && s.bundleId !== PHOTOS_BUNDLE_ID) {
+      return { appSessionOpen: true, bundleId: s.bundleId };
+    }
+  } catch {
+    /* ignore circular/init */
+  }
+  return { appSessionOpen: false };
+}
+
+function assetMatchesLocalId(
+  assets: Array<{ localIdentifier?: string; uuid?: string }>,
+  localIdentifier: string,
+): boolean {
+  const uuid = localIdentifier.split("/")[0];
+  return assets.some((a) => {
+    const lid = String(a.localIdentifier || "");
+    const u = String(a.uuid || "");
+    return (
+      lid === localIdentifier ||
+      u === uuid ||
+      lid.startsWith(uuid) ||
+      (uuid.length > 0 && lid.toLowerCase().includes(uuid.toLowerCase()))
+    );
+  });
+}
+
 export async function photosImportFile(opts: {
   udid?: string;
   localPath: string;
@@ -394,6 +428,9 @@ export async function photosImportFile(opts: {
 }) {
   const t0 = Date.now();
   const verify = opts.verify !== false;
+  const isVideo = opts.mediaType === "video";
+  const conflict = await appSessionConflictHint();
+
   const upload = await mediaUpload({
     udid: opts.udid,
     localPath: opts.localPath,
@@ -408,27 +445,51 @@ export async function photosImportFile(opts: {
   });
   let list: Awaited<ReturnType<typeof photosList>> | undefined;
   let verified = false;
+  // image: ~2s + 10×2s ≈ 22s; video: ~4s + 15×2.5s ≈ 41s (WAL lag with concurrent app sessions)
+  const firstWaitMs = isVideo ? 4000 : 2000;
+  const pollMs = isVideo ? 2500 : 2000;
+  const polls = isVideo ? 15 : 10;
   if (verify && imp.localIdentifier) {
-    // Photos.sqlite WAL can lag after kill; poll up to ~20s
-    await sleep(2000);
-    const uuid = imp.localIdentifier.split("/")[0];
-    for (let i = 0; i < 10; i++) {
-      list = await photosList({ udid: upload.udid });
-      if (
-        list.assets.some(
-          (a) =>
-            a.localIdentifier === imp.localIdentifier ||
-            a.uuid === uuid ||
-            (typeof a.localIdentifier === "string" &&
-              a.localIdentifier.startsWith(uuid)),
-        )
-      ) {
+    await sleep(firstWaitMs);
+    for (let i = 0; i < polls; i++) {
+      list = await photosList({
+        udid: upload.udid,
+        // Prefer type filter when listing for verify noise; fall back to full if miss
+        mediaType: opts.mediaType,
+      });
+      if (assetMatchesLocalId(list.assets, imp.localIdentifier)) {
         verified = true;
         break;
       }
-      await sleep(2000);
+      // one full unfiltered pass if type filter empty-missed
+      if (list.count === 0 || i === Math.floor(polls / 2)) {
+        const full = await photosList({ udid: upload.udid });
+        list = full;
+        if (assetMatchesLocalId(full.assets, imp.localIdentifier)) {
+          verified = true;
+          break;
+        }
+      }
+      await sleep(pollMs);
     }
   }
+
+  const needsRetry = verify && !verified;
+  let note: string;
+  if (!verify) {
+    note = "PhotoKit localIdentifier set; verify skipped.";
+  } else if (verified) {
+    note =
+      "Import OK; asset in Photos.sqlite untrashed list (Recents should show it).";
+  } else {
+    note =
+      "PhotoKit returned localIdentifier but sqlite verify missed (WAL lag or concurrent App session). " +
+      "Not a fake success: re-run photos_list({ idPrefix / mediaType }) or close other session_open and retry. " +
+      (isVideo
+        ? "Video: prefer no parallel session_open (e.g. Preferences/TikTok) during import."
+        : "Retry photos_list shortly.");
+  }
+
   return {
     ok: true as const,
     stage: "import" as const,
@@ -440,12 +501,20 @@ export async function photosImportFile(opts: {
     localIdentifier: imp.localIdentifier,
     elapsedMs: Date.now() - t0,
     verifiedInSqlite: verify ? verified : undefined,
-    needsRetry: verify && !verified,
-    note: verified
-      ? "Import OK; asset in Photos.sqlite untrashed list (Recents should show it)."
-      : verify
-        ? "PhotoKit returned localIdentifier but sqlite verify missed — open Photos Recents or retry photos_list."
-        : "PhotoKit localIdentifier set; verify skipped.",
+    needsRetry,
+    appSessionOpenDuringImport: conflict.appSessionOpen || undefined,
+    appSessionBundleId: conflict.bundleId,
+    recovery: needsRetry
+      ? [
+          "photos_list with mediaType and/or idPrefix=" +
+            imp.localIdentifier.split("/")[0],
+          "close other session (session_close) then re-import or re-list",
+          isVideo
+            ? "video: avoid session_open other apps during photos_import_file"
+            : "wait a few seconds and photos_list again",
+        ]
+      : undefined,
+    note,
     listCount: list?.count,
   };
 }
