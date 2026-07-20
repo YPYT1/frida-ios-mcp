@@ -1,0 +1,6 @@
+# Not a monorepo; file kept only if tools expect it.
+# Build allow-list lives in package.json → pnpm.allowBuilds
+
+allowBuilds:
+  esbuild: set this to true or false
+  frida: set this to true or false

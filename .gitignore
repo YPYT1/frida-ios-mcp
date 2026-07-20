@@ -1,0 +1,7 @@
+node_modules/
+dist/
+logs/*.log
+*.log
+.DS_Store
+.env
+pnpm-lock.yaml.bak

@@ -1,0 +1,40 @@
+{
+  "name": "frida-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "stdio MCP server for Frida iOS exploration (Playwright-style snapshot/ref loop)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "frida-mcp": "./dist/index.js",
+    "frida-mcp-daemon": "./dist/daemon.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "dev:daemon": "tsx src/daemon.ts",
+    "start": "node dist/index.js",
+    "start:daemon": "node dist/daemon.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "frida": "^17.16.2",
+    "frida-objc-bridge": "^8.0.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["frida", "esbuild"],
+    "allowBuilds": {
+      "frida": true,
+      "esbuild": true
+    }
+  }
+}

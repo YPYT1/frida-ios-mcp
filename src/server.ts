@@ -1,0 +1,460 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { handleMethod } from "./backend.js";
+import { daemonCall } from "./daemon-client.js";
+import { useDaemonMode } from "./protocol.js";
+
+async function run(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<{ content: { type: "text"; text: string }[] }> {
+  if (useDaemonMode()) {
+    const result = await daemonCall(method, params);
+    // daemon returns same shape
+    return result as { content: { type: "text"; text: string }[] };
+  }
+  return handleMethod(method, params);
+}
+
+function toolResult(r: { content: { type: "text"; text: string }[] }) {
+  return r;
+}
+
+export function createMcpServer(): McpServer {
+  const server = new McpServer({
+    name: "frida-ios",
+    version: "0.1.0",
+  });
+
+  server.tool(
+    "device_list",
+    "List Frida devices. Default USB-only. Need matching frida-server on phone (17.x with this package).",
+    {
+      usbOnly: z
+        .boolean()
+        .optional()
+        .describe("Default true: only USB devices. Set false to include local/socket."),
+    },
+    async ({ usbOnly }) => toolResult(await run("device_list", { usbOnly })),
+  );
+
+  server.tool(
+    "app_list",
+    "Enumerate apps: identifier, name, pid. Default userFacing=true filters noisy Apple services. Use runningOnly for live apps, query for name/id substring.",
+    {
+      udid: z.string().optional().describe("Device id; default USB"),
+      runningOnly: z.boolean().optional().describe("Only apps with pid>0"),
+      userFacing: z
+        .boolean()
+        .optional()
+        .describe("Default true: drop idle Apple system services"),
+      query: z.string().optional().describe("Filter by identifier or name substring"),
+    },
+    async ({ udid, runningOnly, userFacing, query }) =>
+      toolResult(await run("app_list", { udid, runningOnly, userFacing, query })),
+  );
+
+  server.tool(
+    "session_open",
+    [
+      "Open long-lived Frida session (spawn-only on this stack).",
+      "ALWAYS uses mode=spawn: kill → spawn suspended → inject agent → resume.",
+      "mode=attach is ignored/forced to spawn unless FRIDA_MCP_ALLOW_ATTACH=1 (unreliable: touch/net).",
+      "TikTok: after open, wait 3–5s before screen_snapshot. Never dump_tree/find_view.",
+      "spawn restarts the process (login UI state may reset).",
+      "captureNet=true installs NSURLSession hooks before resume (launch traffic).",
+      "withSpringBoard=true attaches SpringBoard in parallel (dual inject; App+SB concurrent RPCs).",
+    ].join(" "),
+    {
+      bundleId: z.string().describe("App bundle id, e.g. com.ss.iphone.ugc.Ame"),
+      udid: z.string().optional(),
+      mode: z
+        .enum(["spawn", "attach"])
+        .optional()
+        .describe("Ignored: always spawn unless FRIDA_MCP_ALLOW_ATTACH=1"),
+      captureNet: z
+        .boolean()
+        .optional()
+        .describe("If true, enable NSURLSession capture before resume (spawn)"),
+      withSpringBoard: z
+        .boolean()
+        .optional()
+        .describe("Attach SpringBoard in parallel with app open (dual session)"),
+      netOptions: z
+        .object({
+          maxBody: z.number().optional(),
+          captureResponse: z.boolean().optional(),
+          urlFilter: z.string().optional(),
+        })
+        .optional(),
+    },
+    async ({ bundleId, udid, mode, captureNet, withSpringBoard, netOptions }) =>
+      toolResult(
+        await run("session_open", {
+          bundleId,
+          udid,
+          mode,
+          captureNet,
+          withSpringBoard,
+          netOptions,
+        }),
+      ),
+  );
+
+  server.tool(
+    "dual_ping",
+    "Parallel health: app ping + SpringBoard ping at the same time (proves dual inject + concurrent locks).",
+    {},
+    async () => toolResult(await run("dual_ping")),
+  );
+
+  server.tool(
+    "sb_ensure",
+    "Attach SpringBoard now without listing alerts. Use to warm dual session; then app tools + sb_* can run in parallel.",
+    {},
+    async () => toolResult(await run("sb_ensure")),
+  );
+
+  server.tool(
+    "probe_help",
+    "Recommended probe loop and which tools to prefer/avoid. Call first in a new session.",
+    {},
+    async () => toolResult(await run("probe_help")),
+  );
+
+  server.tool(
+    "session_status",
+    "Session health: alive, touchReliable, deadReason, recovery[], loginStateRisk, springboardAlive, snapshotGeneration.",
+    {},
+    async () => toolResult(await run("session_status")),
+  );
+
+  server.tool(
+    "session_respawn",
+    "Force spawn+inject+resume for current bundle. Kills the app process. Prefer only when session is dead.",
+    {},
+    async () => toolResult(await run("session_respawn")),
+  );
+
+  server.tool(
+    "session_close",
+    "Close app Frida session. Default also closes SpringBoard (no orphan sbLive). Set closeSpringBoard=false to keep SB.",
+    {
+      closeSpringBoard: z
+        .boolean()
+        .optional()
+        .describe("Default true: also sb_close. false keeps SpringBoard attached."),
+    },
+    async ({ closeSpringBoard }) =>
+      toolResult(await run("session_close", { closeSpringBoard })),
+  );
+
+  server.tool(
+    "ping",
+    "Agent liveness probe (returns pong). Do not use wrong RPC names as probes.",
+    {},
+    async () => toolResult(await run("ping")),
+  );
+
+  server.tool(
+    "screen_window",
+    "Key window size: {width,height,x,y,cx,cy,className}. Safe on TikTok.",
+    {},
+    async () => toolResult(await run("screen_window")),
+  );
+
+  server.tool(
+    "screen_snapshot",
+    [
+      "Read screen → generation-scoped refs (g3t8). PRIMARY read tool.",
+      "Defaults: onScreenOnly=true, limit=40 (token-safe).",
+      "TikTok: texts only (tree blocked). search= substring by default; a|b auto-enables regex.",
+      "showDiff=true compares to previous snapshot. Do not parallelize app acts (tap/swipe/type).",
+    ].join(" "),
+    {
+      mode: z.enum(["texts", "tree"]).optional().describe("TikTok forced to texts"),
+      onScreenOnly: z
+        .boolean()
+        .optional()
+        .describe("Default true: hide off-screen nodes from output"),
+      limit: z.number().optional().describe("Max nodes printed, default 40"),
+      search: z
+        .string()
+        .optional()
+        .describe("Substring filter; use searchRegex:true or a|b for regex alternation"),
+      searchRegex: z
+        .boolean()
+        .optional()
+        .describe("Force regex (default auto if search contains |)"),
+      showDiff: z.boolean().optional().describe("Summarize +/− vs previous snapshot"),
+    },
+    async (args) => toolResult(await run("screen_snapshot", args)),
+  );
+
+  server.tool(
+    "screen_search",
+    "Filter last snapshot. query default SUBSTRING; regex:true or a|b for regex. Does not touch device.",
+    {
+      query: z.string().describe("Substring unless regex/auto |"),
+      regex: z.boolean().optional().describe("Force regex mode"),
+    },
+    async ({ query, regex }) => toolResult(await run("screen_search", { query, regex })),
+  );
+
+  server.tool(
+    "process_list",
+    "List device processes (pid, name). query is LITERAL substring only (not regex; SpringBoard ok, a|b is wrong).",
+    {
+      udid: z.string().optional(),
+      query: z.string().optional().describe("Case-insensitive substring, NOT regex"),
+      limit: z.number().optional().describe("Max rows, default 200"),
+    },
+    async ({ udid, query, limit }) =>
+      toolResult(await run("process_list", { udid, query, limit })),
+  );
+
+  server.tool(
+    "tap",
+    [
+      "Tap by ref (gNtM) or x,y. Default resnapshot=true returns new screen_snapshot in result.snapshot.",
+      "Set resnapshot=false only when chaining many acts then one snapshot.",
+    ].join(" "),
+    {
+      ref: z.string().optional().describe("e.g. g2t3 from latest snapshot"),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      resnapshot: z
+        .boolean()
+        .optional()
+        .describe("Default true: auto screen_snapshot after tap"),
+    },
+    async ({ ref, x, y, resnapshot }) =>
+      toolResult(await run("tap", { ref, x, y, resnapshot })),
+  );
+
+  server.tool(
+    "double_tap",
+    "Double-tap (like) at ref or x,y. gapMs default 140. resnapshot default true.",
+    {
+      ref: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      gapMs: z.number().optional().describe("Default 140"),
+      resnapshot: z.boolean().optional().describe("Default true"),
+    },
+    async ({ ref, x, y, gapMs, resnapshot }) =>
+      toolResult(await run("double_tap", { ref, x, y, gapMs, resnapshot })),
+  );
+
+  server.tool(
+    "swipe",
+    "Swipe direction or path. resnapshot default true (feed browse: set false then one snapshot).",
+    {
+      direction: z.enum(["up", "down", "left", "right"]).optional(),
+      x0: z.number().optional(),
+      y0: z.number().optional(),
+      x1: z.number().optional(),
+      y1: z.number().optional(),
+      duration: z.number().optional(),
+      resnapshot: z.boolean().optional().describe("Default true"),
+    },
+    async (args) => toolResult(await run("swipe", args)),
+  );
+
+  server.tool(
+    "set_otp",
+    "Fill TikTok OTP (TMVerificationCodeInputView / TUXPinField). Pass full code string e.g. 123456.",
+    {
+      code: z.string().describe("OTP digits"),
+      source: z.string().optional().describe("Debug tag, default mcp"),
+    },
+    async ({ code, source }) => toolResult(await run("set_otp", { code, source })),
+  );
+
+  server.tool(
+    "set_text_at_point",
+    "[DEBUG] setText at point — NOT 拟人. Daily probe: use type_text / smart_type_text instead.",
+    {
+      text: z.string(),
+      ref: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+    },
+    async ({ text, ref, x, y }) =>
+      toolResult(await run("set_text_at_point", { text, ref, x, y })),
+  );
+
+  server.tool(
+    "dump_modal",
+    "[DEBUG] dumpModalView. BLOCKED on TikTok. Daily probe: do not use.",
+    {},
+    async () => toolResult(await run("dump_modal")),
+  );
+
+  server.tool(
+    "rpc_call",
+    "[DEBUG] Whitelisted agent RPC only. Daily probe: do not use — prefer first-class tools + probe_help.",
+    {
+      name: z.string().describe("RPC name e.g. windowFrame"),
+      args: z.array(z.unknown()).optional(),
+    },
+    async ({ name, args }) => toolResult(await run("rpc_call", { name, args })),
+  );
+
+  server.tool(
+    "sb_alert_list",
+    "List SpringBoard system alerts (separate SB attach). Returns appSession alive. After dismiss → app screen_snapshot.",
+    {},
+    async () => toolResult(await run("sb_alert_list")),
+  );
+
+  server.tool(
+    "sb_alert_tap",
+    "Tap SpringBoard alert button by title. Then call app screen_snapshot.",
+    { title: z.string().describe("Button title to match") },
+    async ({ title }) => toolResult(await run("sb_alert_tap", { title })),
+  );
+
+  server.tool(
+    "sb_alert_dismiss",
+    "Dismiss SB alert. Default policy=deny (cancel/not-allow; location-safe). Then app screen_snapshot.",
+    {
+      policy: z.enum(["deny", "default", "first"]).optional().describe("Default deny"),
+    },
+    async ({ policy }) => toolResult(await run("sb_alert_dismiss", { policy })),
+  );
+
+  server.tool(
+    "sb_close",
+    "Detach SpringBoard Frida session (app session_open stays open).",
+    {},
+    async () => toolResult(await run("sb_close")),
+  );
+
+  server.tool(
+    "type_text",
+    [
+      "拟人逐字 into ALREADY-FOCUSED field (TypeTextAction). Default perCharDelayMs=90 + jitter.",
+      "If field not focused → use smart_type_text instead. resnapshot default true.",
+    ].join(" "),
+    {
+      text: z.string().describe("Text to type (CJK/Emoji OK)"),
+      perCharDelayMs: z.number().optional().describe("Default 90"),
+      resnapshot: z.boolean().optional().describe("Default true"),
+    },
+    async ({ text, perCharDelayMs, resnapshot }) =>
+      toolResult(await run("type_text", { text, perCharDelayMs, resnapshot })),
+  );
+
+  server.tool(
+    "smart_type_text",
+    [
+      "PREFERRED typing: tap input (ref|x,y) → wait firstResponder → human_pause → 拟人逐字.",
+      "Retries once on fail. resnapshot default true.",
+    ].join(" "),
+    {
+      text: z.string(),
+      ref: z.string().optional().describe("Input field ref e.g. g2t5"),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      perCharDelayMs: z.number().optional().describe("Default 90"),
+      waitKeyboardMs: z.number().optional().describe("Default 2000"),
+      retryOnFail: z.boolean().optional().describe("Default true"),
+      resnapshot: z.boolean().optional().describe("Default true"),
+    },
+    async (args) => toolResult(await run("smart_type_text", args)),
+  );
+
+  server.tool(
+    "clear_text",
+    "Clear current firstResponder text field (setText empty).",
+    {},
+    async () => toolResult(await run("clear_text")),
+  );
+
+  server.tool(
+    "human_pause",
+    "Random step gap sleep (fleetcontrol human_pause). Not typing delay — use between actions.",
+    {
+      minMs: z.number().optional().describe("Default 200"),
+      maxMs: z.number().optional().describe("Default 500"),
+    },
+    async ({ minMs, maxMs }) => toolResult(await run("human_pause", { minMs, maxMs })),
+  );
+
+  server.tool(
+    "first_responder",
+    "Current firstResponder info (className/frame/canInsertText). Check focus before type_text.",
+    {},
+    async () => toolResult(await run("first_responder")),
+  );
+
+  server.tool(
+    "press_home",
+    "Background current app (suspend) so SpringBoard shows. Session may remain attached to previous app.",
+    {},
+    async () => toolResult(await run("press_home")),
+  );
+
+  server.tool(
+    "wait",
+    "Sleep N milliseconds for app settle (use 3000–5000 after TikTok session_open).",
+    { ms: z.number().describe("milliseconds") },
+    async ({ ms }) => toolResult(await run("wait", { ms })),
+  );
+
+  server.tool(
+    "net_enable",
+    [
+      "Start NSURLSession capture in current app (TLS plaintext after app decrypt).",
+      "Each call RESETS opts (urlFilter defaults empty — pass urlFilter every time you need it).",
+      "Needs device network for real traffic. Typical: enable → wait/use app → net_dump.",
+    ].join(" "),
+    {
+      maxBody: z.number().optional().describe("Max body preview bytes, default 4096"),
+      captureResponse: z
+        .boolean()
+        .optional()
+        .describe("Default false (more stable)"),
+      urlFilter: z
+        .string()
+        .optional()
+        .describe("URL regex; omitted/empty = capture all. Not sticky across enables."),
+    },
+    async ({ maxBody, captureResponse, urlFilter }) =>
+      toolResult(await run("net_enable", { maxBody, captureResponse, urlFilter })),
+  );
+
+  server.tool(
+    "net_disable",
+    "Stop recording new network entries (buffer retained until net_clear).",
+    {},
+    async () => toolResult(await run("net_disable")),
+  );
+
+  server.tool(
+    "net_clear",
+    "Clear captured network buffer.",
+    {},
+    async () => toolResult(await run("net_clear")),
+  );
+
+  server.tool(
+    "net_status",
+    "Network capture status: enabled, hooksInstalled, count, options.",
+    {},
+    async () => toolResult(await run("net_status")),
+  );
+
+  server.tool(
+    "net_dump",
+    "Dump captured HTTP(S) entries (method/url/headers/body preview/status). Optional query substring + limit.",
+    {
+      limit: z.number().optional().describe("Max entries to return, default 50"),
+      query: z.string().optional().describe("Filter substring on url/method/status"),
+    },
+    async ({ limit, query }) => toolResult(await run("net_dump", { limit, query })),
+  );
+
+  return server;
+}
