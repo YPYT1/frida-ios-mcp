@@ -234,7 +234,7 @@ FRIDA_MCP_MODE = "daemon"
 | `app_list` | Apps + pid. Default `userFacing=true` filters Apple services; `runningOnly` / `query` supported |
 | `session_open` | spawn \| attach + inject |
 | `session_status` / `session_respawn` / `session_close` / `session_force_unlock` | lifecycle + stuck-lock recovery (`appLockBusy`, `openInFlight`, `refsValid`) |
-| `wait` / `wait_until_texts` | blind sleep vs poll until text pattern (prefer for TikTok land) |
+| `wait` / `wait_until_texts` | blind sleep vs poll until text; TikTok use `preset:"tiktok_feed"` (multi-locale) |
 | `ping` | agent liveness |
 | `screen_window` | simplified `{width,height,x,y,cx,cy,className}` |
 | `screen_snapshot` / `screen_search` | texts refs are generation-scoped (`g3t8`); tree mode does not wipe texts refs |

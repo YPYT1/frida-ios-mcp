@@ -269,7 +269,7 @@ export function mapError(err: unknown): {
 export const PROBE_HELP = {
   loop: [
     "session_open { bundleId, withSpringBoard?: true }",
-    'TikTok: wait_until_texts({ pattern: "首頁|為您推薦|Home|For You", timeoutMs: 15000 })  // prefer over blind wait',
+    'TikTok: wait_until_texts({ preset: "tiktok_feed", timeoutMs: 15000 })  // multi-locale; not one language',
     "screen_snapshot { onScreenOnly: true, limit: 40 }  // prefer [input] refs for typing",
     "tap | swipe | smart_type_text  // resnapshot defaults true; SERIAL on app channel",
     "screen_snapshot if resnapshot=false",
@@ -277,12 +277,12 @@ export const PROBE_HELP = {
   prefer: {
     type: "smart_type_text on [input] refs; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
-    land: 'wait_until_texts after TikTok open — do not blind wait(4000)',
+    land: 'wait_until_texts({ preset: "tiktok_feed" }) after TikTok open — never hardcode TW/JP/EN alone',
     stuck:
       "session_status (openInFlight/appLockBusy/refsValid) → session_force_unlock → one session_open",
     system_alert:
       "sb_alert_trigger (force default false) → sb_alert_list (preferDismissAll) → sb_alert_dismiss({all:true}) when unsure — never parallel tap+dismiss → app screen_snapshot",
-    dead_session: "session_respawn → wait_until_texts / wait → screen_snapshot (login may reset)",
+    dead_session: "session_respawn → wait_until_texts({preset:\"tiktok_feed\"}) / wait → screen_snapshot (login may reset)",
     media:
       "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; video: avoid parallel session_open other apps",
     system_alert_stack:

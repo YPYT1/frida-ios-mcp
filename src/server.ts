@@ -452,14 +452,19 @@ export function createMcpServer(): McpServer {
   server.tool(
     "wait_until_texts",
     [
-      "Poll screen_snapshot until on-screen text matches pattern (or timeout).",
-      'TikTok after open: pattern "首頁|為您推薦|Home|For You", timeoutMs 15000.',
-      "Returns matched hits + snapshot. Prefer over blind wait().",
+      "Poll screen_snapshot until on-screen text matches pattern or preset (or timeout).",
+      'TikTok: prefer preset "tiktok_feed" (EN/ZH-Hant/ZH-Hans/JA/KO) — do not hardcode one language.',
+      "Custom pattern still allowed for page-specific probes.",
     ].join(" "),
     {
       pattern: z
         .string()
-        .describe('Text to match; "|" auto-enables regex e.g. 首頁|Home'),
+        .optional()
+        .describe('Custom text; "|" auto-regex. Prefer preset for TikTok land.'),
+      preset: z
+        .string()
+        .optional()
+        .describe('Built-in multi-locale set, e.g. "tiktok_feed"'),
       timeoutMs: z.number().optional().describe("Default 15000"),
       intervalMs: z.number().optional().describe("Poll interval, default 800"),
       searchRegex: z
@@ -468,10 +473,11 @@ export function createMcpServer(): McpServer {
         .describe("Force regex; default auto when pattern contains |"),
       onScreenOnly: z.boolean().optional().describe("Default true"),
     },
-    async ({ pattern, timeoutMs, intervalMs, searchRegex, onScreenOnly }) =>
+    async ({ pattern, preset, timeoutMs, intervalMs, searchRegex, onScreenOnly }) =>
       toolResult(
         await run("wait_until_texts", {
           pattern,
+          preset,
           timeoutMs,
           intervalMs,
           searchRegex,

@@ -408,9 +408,13 @@ export async function handleMethod(
         return textResult(`waited ${ms}ms`);
       }
       case "wait_until_texts": {
-        const pattern = String(params.pattern ?? "");
+        const pattern =
+          typeof params.pattern === "string" ? params.pattern : undefined;
+        const preset =
+          typeof params.preset === "string" ? params.preset : undefined;
         const r = await sessionStore.waitUntilTexts({
           pattern,
+          preset,
           timeoutMs:
             params.timeoutMs != null ? Number(params.timeoutMs) : undefined,
           intervalMs:
@@ -421,8 +425,7 @@ export async function handleMethod(
               : params.regex != null
                 ? Boolean(params.regex)
                 : undefined,
-          onScreenOnly:
-            params.onScreenOnly === false ? false : true,
+          onScreenOnly: params.onScreenOnly === false ? false : true,
         });
         return jsonResult(r);
       }

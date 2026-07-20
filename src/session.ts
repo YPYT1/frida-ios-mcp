@@ -32,6 +32,7 @@ import {
 import { ProbeError } from "./errors.js";
 import { AsyncMutex, type MutexStatus } from "./mutex.js";
 import { photosChannel } from "./photos.js";
+import { resolveTextPreset } from "./presets.js";
 
 export type SessionStatus = {
   open: boolean;
@@ -551,7 +552,7 @@ class SessionStore {
     if (isTikTokBundle(bundleId)) {
       warnings.push(TIKTOK_WAIT_HINT);
       warnings.push(
-        'Prefer wait_until_texts({ pattern: "首頁|為您推薦|Home|For You" }) instead of blind wait(4000).',
+        'Prefer wait_until_texts({ preset: "tiktok_feed" }) — multi-locale (EN/ZH/JA/KO), do not hardcode one language.',
       );
     }
     if (opts.captureNet) {
@@ -561,6 +562,7 @@ class SessionStore {
     }
 
     this.orphanFridaOpPossible = false;
+    this.openInFlight = false;
     return {
       ...this.status(),
       warnings,
@@ -569,7 +571,7 @@ class SessionStore {
       loginStateRisk: true,
       dualParallel: true,
       next: isTikTokBundle(bundleId)
-        ? 'wait_until_texts({ pattern: "首頁|為您推薦|Home|For You", timeoutMs: 15000 }) then probe. Dual: app + sb_* parallel OK.'
+        ? 'wait_until_texts({ preset: "tiktok_feed", timeoutMs: 15000 }) then probe. Dual: app + sb_* parallel OK.'
         : "wait(3000-5000) then screen_snapshot. Dual: app tools + sb_* can run in parallel (separate locks).",
     };
     } finally {
@@ -851,9 +853,12 @@ class SessionStore {
   /**
    * Poll screen_snapshot until pattern matches on-screen text or timeout.
    * Prefer over blind wait() after TikTok session_open.
+   * Use preset:"tiktok_feed" for multi-locale land (do not hardcode one language).
    */
   async waitUntilTexts(opts: {
-    pattern: string;
+    pattern?: string;
+    /** e.g. tiktok_feed — multi-locale nav/For-You chrome */
+    preset?: string;
     timeoutMs?: number;
     intervalMs?: number;
     searchRegex?: boolean;
@@ -864,16 +869,20 @@ class SessionStore {
     elapsedMs: number;
     polls: number;
     pattern: string;
+    preset?: string;
     hits: Array<{ ref: string; text: string; likelyInput?: boolean }>;
     snapshot?: string;
     timedOut?: boolean;
     next?: string;
   }> {
-    const pattern = opts.pattern?.trim();
+    const presetInfo = resolveTextPreset(opts.preset);
+    const pattern = (opts.pattern?.trim() || presetInfo?.pattern || "").trim();
     if (!pattern) {
-      throw new ProbeError("INVALID_ARGS", "pattern is required", [
-        'wait_until_texts({ pattern: "首頁|為您推薦|Home" })',
-      ]);
+      throw new ProbeError(
+        "INVALID_ARGS",
+        'pattern or preset is required. TikTok: wait_until_texts({ preset: "tiktok_feed" })',
+        ['wait_until_texts({ preset: "tiktok_feed", timeoutMs: 15000 })'],
+      );
     }
     const timeoutMs = Math.max(
       500,
@@ -883,7 +892,9 @@ class SessionStore {
       200,
       Math.min(5_000, Math.floor(opts.intervalMs ?? 800)),
     );
-    const { useRegex } = resolveSearchMode(pattern, opts.searchRegex);
+    // Presets are always regex alternations; explicit pattern keeps resolveSearchMode
+    const forceRegex = presetInfo ? true : opts.searchRegex;
+    const { useRegex } = resolveSearchMode(pattern, forceRegex);
     const t0 = Date.now();
     let polls = 0;
     let lastText = "";
@@ -912,6 +923,7 @@ class SessionStore {
           elapsedMs: Date.now() - t0,
           polls,
           pattern,
+          preset: presetInfo?.id,
           hits,
           snapshot: text,
           next: "Use refs from snapshot (this generation). Prefer [input] for typing.",
@@ -927,10 +939,11 @@ class SessionStore {
       elapsedMs: Date.now() - t0,
       polls,
       pattern,
+      preset: presetInfo?.id,
       hits: [],
       snapshot: lastText || undefined,
       next:
-        "Timed out — screen_snapshot without filter; login wall / locale mismatch? Adjust pattern or wait longer.",
+        "Timed out — try preset:\"tiktok_feed\" (multi-locale), or screen_snapshot without filter (login wall?).",
     };
   }
 

@@ -1,5 +1,5 @@
 /**
- * Node test runner (no deps): mutex hold/wait timeout + forceReset + snapshot likelyInput.
+ * Node test runner (no deps): mutex hold/wait timeout + forceReset + snapshot likelyInput + presets.
  * Run: pnpm test
  */
 import { describe, it } from "node:test";
@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { AsyncMutex } from "../dist/mutex.js";
 import { ProbeError } from "../dist/errors.js";
 import { buildTextSnapshot, formatSnapshot } from "../dist/snapshot.js";
+import { resolveTextPreset } from "../dist/presets.js";
 
 describe("AsyncMutex", () => {
   it("holdTimeout releases lock while fn still hung", async () => {
@@ -60,5 +61,18 @@ describe("snapshot likelyInput", () => {
     const text = formatSnapshot(table, { limit: 5 });
     assert.match(text, /\[input\]/);
     assert.ok(text.indexOf("搜尋") < text.indexOf("首頁"));
+  });
+});
+
+describe("presets", () => {
+  it("tiktok_feed covers JA and TW without assuming one locale", () => {
+    const p = resolveTextPreset("tiktok_feed");
+    assert.ok(p);
+    assert.match(p.pattern, /おすすめ/);
+    assert.match(p.pattern, /為您推薦/);
+    assert.match(p.pattern, /ホーム/);
+    assert.match(p.pattern, /For You/);
+    assert.match(p.pattern, /首页/);
+    assert.match(p.pattern, /홈/);
   });
 });
