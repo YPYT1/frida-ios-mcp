@@ -2,6 +2,7 @@ import {
   closeLiveSession,
   callRpc,
   closeTimeoutMs,
+  getDevice,
   lockWaitTimeoutMs,
   openAttachByProcessName,
   openAttachSession,
@@ -22,6 +23,7 @@ import {
 import {
   buildTextSnapshot,
   formatSnapshot,
+  resolveSearchMode,
   searchSnapshot,
   type SnapshotFormatOpts,
   type SnapshotTable,
@@ -41,9 +43,14 @@ export type SessionStatus = {
   safeUi?: boolean;
   injected?: boolean;
   touchReliable?: boolean;
+  /** True only when in-memory ref table is valid for tap/type */
   hasSnapshot?: boolean;
+  /** Alias of hasSnapshot — prefer this name in new clients */
+  refsValid?: boolean;
   snapshotNodeCount?: number;
   snapshotGeneration?: number;
+  lastSnapshotGeneration?: number;
+  snapshotStale?: boolean;
   deadReason?: string;
   hint?: string;
   recovery?: string[];
@@ -66,6 +73,8 @@ export type SessionStatus = {
   sbLockWaiters?: number;
   sbLockBusyOp?: string | null;
   orphanFridaOpPossible?: boolean;
+  /** True while session_open critical section is running (even before lock acquire) */
+  openInFlight?: boolean;
 };
 
 export type SnapshotRequest = SnapshotFormatOpts & {
@@ -96,6 +105,11 @@ class SessionStore {
   private readonly sbLock = new AsyncMutex();
   /** Set after forceUnlock / open timeout — native Frida may still be running. */
   private orphanFridaOpPossible = false;
+  /** Guards overlapping session_open before lock is even acquired. */
+  private openInFlight = false;
+  /** Last app pid we spawned/attached — for orphan kill after force unlock */
+  private lastAppPid: number | null = null;
+  private lastAppUdid: string | undefined;
 
   private lockFields(): Pick<
     SessionStatus,
@@ -107,6 +121,7 @@ class SessionStore {
     | "sbLockWaiters"
     | "sbLockBusyOp"
     | "orphanFridaOpPossible"
+    | "openInFlight"
   > {
     const app = this.appLock.status();
     const sb = this.sbLock.status();
@@ -119,6 +134,28 @@ class SessionStore {
       sbLockWaiters: sb.waiters,
       sbLockBusyOp: sb.busyOp,
       orphanFridaOpPossible: this.orphanFridaOpPossible || undefined,
+      openInFlight: this.openInFlight || undefined,
+    };
+  }
+
+  private refsFields(): Pick<
+    SessionStatus,
+    | "hasSnapshot"
+    | "refsValid"
+    | "snapshotNodeCount"
+    | "snapshotGeneration"
+    | "lastSnapshotGeneration"
+    | "snapshotStale"
+  > {
+    const refsValid = !!this.snapshot;
+    return {
+      hasSnapshot: refsValid,
+      refsValid,
+      snapshotNodeCount: this.snapshot?.nodes.length ?? 0,
+      snapshotGeneration: this.snapshot?.generation,
+      lastSnapshotGeneration:
+        this.snapshot?.generation ?? this.lastSnapMeta?.generation,
+      snapshotStale: !this.snapshot && !!this.lastSnapMeta,
     };
   }
 
@@ -146,7 +183,17 @@ class SessionStore {
 
   status(): SessionStatus {
     const locks = this.lockFields();
+    const refs = this.refsFields();
     const lockHint = this.lockHint(this.appLock.status());
+    if (this.openInFlight && !lockHint.hint) {
+      lockHint.hint =
+        "session_open in flight — do not start another open; wait or session_force_unlock if stuck.";
+      lockHint.recovery = [
+        "wait for current session_open",
+        "session_force_unlock if hung",
+        "or restart MCP process",
+      ];
+    }
     if (!this.live) {
       const sbAlive = !!this.sbLive?.alive;
       const intentionalKeep = sbAlive && this.sbKeepIntentional;
@@ -155,7 +202,7 @@ class SessionStore {
         open: false,
         alive: false,
         injected: false,
-        hasSnapshot: false,
+        ...refs,
         springboardAlive: sbAlive,
         springboardPid: this.sbLive?.alive ? this.sbLive.pid : undefined,
         springboardKept: intentionalKeep || undefined,
@@ -191,9 +238,7 @@ class SessionStore {
       safeUi: isTikTokBundle(this.live.bundleId),
       injected: alive,
       touchReliable: alive ? this.live.touchReliable : false,
-      hasSnapshot: !!this.snapshot,
-      snapshotNodeCount: this.snapshot?.nodes.length ?? 0,
-      snapshotGeneration: this.snapshot?.generation,
+      ...refs,
       deadReason: this.live.deadReason,
       loginStateRisk: this.live.mode === "spawn",
       springboardAlive: !!this.sbLive?.alive,
@@ -339,11 +384,29 @@ class SessionStore {
       springboard?: unknown;
     }
   > {
+    if (this.openInFlight) {
+      throw new ProbeError(
+        "SESSION_OPEN_IN_FLIGHT",
+        "Another session_open is already running in this MCP process. Wait for it, or call session_force_unlock if it is stuck.",
+        ["session_status", "session_force_unlock", "wait then retry session_open"],
+      );
+    }
+    const appBusy = this.appLock.status();
+    if (appBusy.busy && appBusy.busyOp === "session_open") {
+      throw new ProbeError(
+        "SESSION_OPEN_IN_FLIGHT",
+        `session_open already holds appLock (since ${appBusy.busySinceMs}ms). Do not stack opens.`,
+        ["session_status", "session_force_unlock", "wait then retry session_open"],
+      );
+    }
+
+    this.openInFlight = true;
     const bundleId = opts.bundleId;
     const warnings: string[] = [];
     let net: unknown;
     let springboard: unknown;
 
+    try {
     // --- Spawn-only policy (this device stack) ---
     let mode: "spawn" | "attach" = "spawn";
     if (opts.mode === "attach") {
@@ -446,6 +509,8 @@ class SessionStore {
             }
           }
 
+          this.lastAppPid = this.live.pid;
+          this.lastAppUdid = this.live.udid;
           this.live.onDead = (reason) => {
             this.markDead(reason);
             this.snapshot = null;
@@ -485,6 +550,9 @@ class SessionStore {
 
     if (isTikTokBundle(bundleId)) {
       warnings.push(TIKTOK_WAIT_HINT);
+      warnings.push(
+        'Prefer wait_until_texts({ pattern: "首頁|為您推薦|Home|For You" }) instead of blind wait(4000).',
+      );
     }
     if (opts.captureNet) {
       warnings.push(
@@ -500,9 +568,13 @@ class SessionStore {
       springboard,
       loginStateRisk: true,
       dualParallel: true,
-      next:
-        "wait(3000-5000) then screen_snapshot. Dual: app tools + sb_* can run in parallel (separate locks).",
+      next: isTikTokBundle(bundleId)
+        ? 'wait_until_texts({ pattern: "首頁|為您推薦|Home|For You", timeoutMs: 15000 }) then probe. Dual: app + sb_* parallel OK.'
+        : "wait(3000-5000) then screen_snapshot. Dual: app tools + sb_* can run in parallel (separate locks).",
     };
+    } finally {
+      this.openInFlight = false;
+    }
   }
 
   async respawn(): Promise<SessionStatus & { warnings: string[] }> {
@@ -587,16 +659,40 @@ class SessionStore {
     after: SessionStatus;
     appReset: ReturnType<AsyncMutex["forceReset"]>;
     sbReset: ReturnType<AsyncMutex["forceReset"]>;
+    orphanKill?: { attempted: boolean; pid?: number; ok?: boolean; error?: string };
     orphanFridaOpPossible: true;
     hint: string;
   }> {
     const before = this.status();
+    this.openInFlight = false;
     const appReset = this.appLock.forceReset();
     const sbReset = this.sbLock.forceReset();
     this.orphanFridaOpPossible = true;
 
+    const killPid = this.live?.pid ?? this.lastAppPid;
+    const killUdid = this.live?.udid ?? this.lastAppUdid;
+
     await this.detachAppSessionUnlocked();
     await this.detachSbSessionUnlocked();
+
+    let orphanKill: {
+      attempted: boolean;
+      pid?: number;
+      ok?: boolean;
+      error?: string;
+    } = { attempted: false };
+    if (killPid) {
+      orphanKill = { attempted: true, pid: killPid };
+      try {
+        const device = await getDevice(killUdid);
+        await device.kill(killPid);
+        orphanKill.ok = true;
+      } catch (e) {
+        orphanKill.ok = false;
+        orphanKill.error = e instanceof Error ? e.message : String(e);
+      }
+    }
+    this.lastAppPid = null;
 
     return {
       ok: true as const,
@@ -604,9 +700,10 @@ class SessionStore {
       after: this.status(),
       appReset,
       sbReset,
+      orphanKill,
       orphanFridaOpPossible: true as const,
       hint:
-        "Locks reset and sessions detached best-effort. A native Frida call may still be running in background — if device acts oddly, restart MCP.",
+        "Locks reset, sessions detached, best-effort kill of last app pid. If device acts oddly, restart MCP.",
     };
   }
 
@@ -749,6 +846,92 @@ class SessionStore {
     opts: SnapshotRequest = {},
   ): Promise<{ text: string; table: SnapshotTable }> {
     return this.withAppOp(async () => this.screenSnapshotBody(opts));
+  }
+
+  /**
+   * Poll screen_snapshot until pattern matches on-screen text or timeout.
+   * Prefer over blind wait() after TikTok session_open.
+   */
+  async waitUntilTexts(opts: {
+    pattern: string;
+    timeoutMs?: number;
+    intervalMs?: number;
+    searchRegex?: boolean;
+    onScreenOnly?: boolean;
+  }): Promise<{
+    ok: boolean;
+    matched: boolean;
+    elapsedMs: number;
+    polls: number;
+    pattern: string;
+    hits: Array<{ ref: string; text: string; likelyInput?: boolean }>;
+    snapshot?: string;
+    timedOut?: boolean;
+    next?: string;
+  }> {
+    const pattern = opts.pattern?.trim();
+    if (!pattern) {
+      throw new ProbeError("INVALID_ARGS", "pattern is required", [
+        'wait_until_texts({ pattern: "首頁|為您推薦|Home" })',
+      ]);
+    }
+    const timeoutMs = Math.max(
+      500,
+      Math.min(120_000, Math.floor(opts.timeoutMs ?? 15_000)),
+    );
+    const intervalMs = Math.max(
+      200,
+      Math.min(5_000, Math.floor(opts.intervalMs ?? 800)),
+    );
+    const { useRegex } = resolveSearchMode(pattern, opts.searchRegex);
+    const t0 = Date.now();
+    let polls = 0;
+    let lastText = "";
+
+    while (Date.now() - t0 < timeoutMs) {
+      polls += 1;
+      const { text, table } = await this.screenSnapshot({
+        onScreenOnly: opts.onScreenOnly !== false,
+        limit: 40,
+        search: pattern,
+        searchRegex: useRegex,
+      });
+      lastText = text;
+      const hits = searchSnapshot(table, pattern, useRegex)
+        .filter((n) => n.onScreen)
+        .slice(0, 8)
+        .map((n) => ({
+          ref: n.ref,
+          text: n.text.length > 80 ? `${n.text.slice(0, 77)}...` : n.text,
+          likelyInput: n.likelyInput,
+        }));
+      if (hits.length > 0) {
+        return {
+          ok: true,
+          matched: true,
+          elapsedMs: Date.now() - t0,
+          polls,
+          pattern,
+          hits,
+          snapshot: text,
+          next: "Use refs from snapshot (this generation). Prefer [input] for typing.",
+        };
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+
+    return {
+      ok: false,
+      matched: false,
+      timedOut: true,
+      elapsedMs: Date.now() - t0,
+      polls,
+      pattern,
+      hits: [],
+      snapshot: lastText || undefined,
+      next:
+        "Timed out — screen_snapshot without filter; login wall / locale mismatch? Adjust pattern or wait longer.",
+    };
   }
 
   private async screenSnapshotBody(
@@ -1010,22 +1193,28 @@ class SessionStore {
     const r = (await this.sbRpc("sbAlertList")) as Record<string, unknown>;
     const alertCount = Number(r.alertCount ?? 0);
     const actionViewCount = Number(r.actionViewCount ?? 0);
+    const actionViewCountRaw = Number(r.actionViewCountRaw ?? actionViewCount);
     const hasAlert =
       typeof r.hasAlert === "boolean"
         ? r.hasAlert
         : alertCount > 0 || actionViewCount > 0;
+    const preferDismissAll =
+      actionViewCountRaw > 1 || Number(r.alertCountRaw ?? alertCount) > 1;
     return {
       ...r,
       hasAlert,
+      preferDismissAll,
       note:
         typeof r.note === "string"
           ? r.note
           : "alerts=SBUserNotificationAlert; actionViews=buttons (test alerts often only actionViews). hasAlert = actionViewCount>0 || alertCount>0.",
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
-      next: hasAlert
-        ? 'Unsure if stacked (live count can undercount) → sb_alert_dismiss({ all: true }); then app screen_snapshot'
-        : "No SB alert — continue with app screen_snapshot",
+      next: !hasAlert
+        ? "No SB alert — continue with app screen_snapshot"
+        : preferDismissAll
+          ? "Stacked/uncertain — sb_alert_dismiss({ all: true }); then app screen_snapshot"
+          : 'sb_alert_dismiss({ all: true }) or sb_alert_tap("Dismiss"); then app screen_snapshot',
     };
   }
 

@@ -7,6 +7,7 @@ export type ErrorCode =
   | "SESSION_DEAD"
   | "SCRIPT_DESTROYED"
   | "SESSION_OPEN_TIMEOUT"
+  | "SESSION_OPEN_IN_FLIGHT"
   | "APP_LOCK_TIMEOUT"
   | "APP_LOCK_HOLD_TIMEOUT"
   | "APP_LOCK_RESET"
@@ -161,6 +162,18 @@ export function mapError(err: unknown): {
       ],
     };
   }
+  if (/already running|open in flight|session_open_in_flight|do not stack opens/i.test(m)) {
+    return {
+      ok: false,
+      code: "SESSION_OPEN_IN_FLIGHT",
+      error: message,
+      recovery: [
+        "session_status",
+        "wait for current open or session_force_unlock",
+        "then retry session_open once",
+      ],
+    };
+  }
   if (/session is dead|script is destroyed|script destroyed|detached/i.test(m)) {
     return {
       ok: false,
@@ -256,17 +269,20 @@ export function mapError(err: unknown): {
 export const PROBE_HELP = {
   loop: [
     "session_open { bundleId, withSpringBoard?: true }",
-    "wait { ms: 3000-5000 }  // TikTok: always",
-    "screen_snapshot { onScreenOnly: true, limit: 40 }",
+    'TikTok: wait_until_texts({ pattern: "首頁|為您推薦|Home|For You", timeoutMs: 15000 })  // prefer over blind wait',
+    "screen_snapshot { onScreenOnly: true, limit: 40 }  // prefer [input] refs for typing",
     "tap | swipe | smart_type_text  // resnapshot defaults true; SERIAL on app channel",
     "screen_snapshot if resnapshot=false",
   ],
   prefer: {
-    type: "smart_type_text when field needs focus; type_text only if already focused",
+    type: "smart_type_text on [input] refs; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
+    land: 'wait_until_texts after TikTok open — do not blind wait(4000)',
+    stuck:
+      "session_status (openInFlight/appLockBusy/refsValid) → session_force_unlock → one session_open",
     system_alert:
-      "sb_alert_trigger (force default false) → sb_alert_list (live+raw counts; raw may > live) → single dismiss post-settle | stacked/unsure: sb_alert_dismiss({all:true}) — do not trust actionViewCount===1 after force; never parallel tap+dismiss → app screen_snapshot",
-    dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
+      "sb_alert_trigger (force default false) → sb_alert_list (preferDismissAll) → sb_alert_dismiss({all:true}) when unsure — never parallel tap+dismiss → app screen_snapshot",
+    dead_session: "session_respawn → wait_until_texts / wait → screen_snapshot (login may reset)",
     media:
       "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; video: avoid parallel session_open other apps",
     system_alert_stack:

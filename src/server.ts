@@ -124,7 +124,7 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "session_status",
-    "Session health: alive, touchReliable, deadReason, recovery[], loginStateRisk, springboardAlive, snapshotGeneration, appLockBusy/waiters (diagnose stuck open).",
+    "Session health: alive, refsValid/hasSnapshot, lastSnapshotGeneration, openInFlight, appLockBusy/waiters, recovery[].",
     {},
     async () => toolResult(await run("session_status")),
   );
@@ -444,9 +444,40 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "wait",
-    "Sleep N milliseconds for app settle (use 3000–5000 after TikTok session_open).",
+    "Sleep N milliseconds. Prefer wait_until_texts after TikTok session_open instead of blind wait.",
     { ms: z.number().describe("milliseconds") },
     async ({ ms }) => toolResult(await run("wait", { ms })),
+  );
+
+  server.tool(
+    "wait_until_texts",
+    [
+      "Poll screen_snapshot until on-screen text matches pattern (or timeout).",
+      'TikTok after open: pattern "首頁|為您推薦|Home|For You", timeoutMs 15000.',
+      "Returns matched hits + snapshot. Prefer over blind wait().",
+    ].join(" "),
+    {
+      pattern: z
+        .string()
+        .describe('Text to match; "|" auto-enables regex e.g. 首頁|Home'),
+      timeoutMs: z.number().optional().describe("Default 15000"),
+      intervalMs: z.number().optional().describe("Poll interval, default 800"),
+      searchRegex: z
+        .boolean()
+        .optional()
+        .describe("Force regex; default auto when pattern contains |"),
+      onScreenOnly: z.boolean().optional().describe("Default true"),
+    },
+    async ({ pattern, timeoutMs, intervalMs, searchRegex, onScreenOnly }) =>
+      toolResult(
+        await run("wait_until_texts", {
+          pattern,
+          timeoutMs,
+          intervalMs,
+          searchRegex,
+          onScreenOnly,
+        }),
+      ),
   );
 
   server.tool(

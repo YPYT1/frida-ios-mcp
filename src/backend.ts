@@ -407,6 +407,25 @@ export async function handleMethod(
         await new Promise((r) => setTimeout(r, ms));
         return textResult(`waited ${ms}ms`);
       }
+      case "wait_until_texts": {
+        const pattern = String(params.pattern ?? "");
+        const r = await sessionStore.waitUntilTexts({
+          pattern,
+          timeoutMs:
+            params.timeoutMs != null ? Number(params.timeoutMs) : undefined,
+          intervalMs:
+            params.intervalMs != null ? Number(params.intervalMs) : undefined,
+          searchRegex:
+            params.searchRegex != null
+              ? Boolean(params.searchRegex)
+              : params.regex != null
+                ? Boolean(params.regex)
+                : undefined,
+          onScreenOnly:
+            params.onScreenOnly === false ? false : true,
+        });
+        return jsonResult(r);
+      }
       case "photos_ensure": {
         const r = await photosChannel.ensure({
           udid: typeof params.udid === "string" ? params.udid : undefined,

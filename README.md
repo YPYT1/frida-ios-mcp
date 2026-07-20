@@ -3,10 +3,11 @@
 TypeScript **stdio MCP** for Frida iOS exploration — Playwright-style loop:
 
 ```text
-device_list → app_list → session_open → wait → screen_snapshot
+device_list → app_list → session_open → wait_until_texts (TikTok) / wait → screen_snapshot
   → tap(ref) / swipe / type_text → screen_snapshot → … → session_close
 ```
 
+If `session_open` hangs or Cursor cancel leaves MCP half-dead: `session_status` → `session_force_unlock` → retry **one** open.
 Independent of `fleetcontrol` (agent JS copied under `agent/`).
 
 ## Requirements
@@ -232,7 +233,8 @@ FRIDA_MCP_MODE = "daemon"
 | `device_list` | Frida devices (default USB-only; `usbOnly=false` for all) |
 | `app_list` | Apps + pid. Default `userFacing=true` filters Apple services; `runningOnly` / `query` supported |
 | `session_open` | spawn \| attach + inject |
-| `session_status` / `session_respawn` / `session_close` / `session_force_unlock` | lifecycle + stuck-lock recovery (`appLockBusy`) |
+| `session_status` / `session_respawn` / `session_close` / `session_force_unlock` | lifecycle + stuck-lock recovery (`appLockBusy`, `openInFlight`, `refsValid`) |
+| `wait` / `wait_until_texts` | blind sleep vs poll until text pattern (prefer for TikTok land) |
 | `ping` | agent liveness |
 | `screen_window` | simplified `{width,height,x,y,cx,cy,className}` |
 | `screen_snapshot` / `screen_search` | texts refs are generation-scoped (`g3t8`); tree mode does not wipe texts refs |

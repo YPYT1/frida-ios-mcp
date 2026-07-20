@@ -11,6 +11,9 @@ export type TextNode = {
   tappable: boolean;
   /** False when center is outside window (if known) */
   onScreen: boolean;
+  /** Heuristic: looks like a text field / search box (prefer for smart_type_text) */
+  likelyInput?: boolean;
+  className?: string;
 };
 
 export type SnapshotTable = {
@@ -80,6 +83,55 @@ function isOnScreen(
   );
 }
 
+function isLikelyInputClass(className: string): boolean {
+  const c = className.toLowerCase();
+  return (
+    c.includes("textfield") ||
+    c.includes("textview") ||
+    c.includes("searchbar") ||
+    c.includes("uitextfield") ||
+    c.includes("uitextview") ||
+    c.includes("yytext") ||
+    (c.includes("search") && c.includes("field"))
+  );
+}
+
+/** Placeholder / search chrome — not nav chips like 有什麼好事 */
+function isLikelyInputText(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 80) return false;
+  if (
+    /^(搜尋|搜索|Search|検索|입력|輸入|输入|Type|Write a|Say something|有什麼想說|说点什么)/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  if (/placeholder|search here|find user/i.test(t)) return true;
+  return false;
+}
+
+function guessLikelyInput(
+  text: string,
+  frame: Frame,
+  className: string,
+): boolean {
+  if (isLikelyInputClass(className)) return true;
+  if (isLikelyInputText(text)) return true;
+  // Wide short field with short label — weak signal only with empty-ish / hint text
+  if (
+    frame.w >= 120 &&
+    frame.h >= 28 &&
+    frame.h <= 56 &&
+    text.trim().length > 0 &&
+    text.trim().length <= 40 &&
+    /搜|Search|search|輸入|输入|Type/i.test(text)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** Build ref table from collectTextsWithFrames payload. */
 export function buildTextSnapshot(
   items: unknown,
@@ -104,8 +156,15 @@ export function buildTextSnapshot(
     if (!text) continue;
     const frame = normalizeFrame(rec.frame);
     const f = frame ?? { x: 0, y: 0, w: 0, h: 0, cx: 0, cy: 0 };
+    const className =
+      typeof rec.className === "string"
+        ? rec.className
+        : typeof rec.cls === "string"
+          ? rec.cls
+          : "";
     const tappable = f.w >= 1 && f.h >= 1 && Number.isFinite(f.cx) && Number.isFinite(f.cy);
     const onScreen = tappable && isOnScreen(f, window);
+    const likelyInput = guessLikelyInput(text, f, className);
     nodes.push({
       ref: `g${generation}t${i++}`,
       text,
@@ -117,6 +176,8 @@ export function buildTextSnapshot(
       h: f.h,
       tappable,
       onScreen,
+      likelyInput: likelyInput || undefined,
+      className: className || undefined,
     });
   }
   return {
@@ -177,10 +238,13 @@ function filterNodes(
       searchMeta = `search=substring:${JSON.stringify(opts.search)}`;
     }
   }
-  // Prefer larger tappable first when limited
+  // Prefer likely inputs, then larger tappable first when limited
   nodes.sort((a, b) => {
     const score = (n: TextNode) =>
-      (n.tappable ? 1000 : 0) + (n.onScreen ? 500 : 0) + n.w * n.h;
+      (n.likelyInput ? 5000 : 0) +
+      (n.tappable ? 1000 : 0) +
+      (n.onScreen ? 500 : 0) +
+      n.w * n.h;
     return score(b) - score(a);
   });
   return { nodes, searchMeta };
@@ -247,15 +311,17 @@ export function formatSnapshot(
     lines.push("window: unknown");
   }
   lines.push(`generation: g${table.generation}`);
+  const inputCount = table.nodes.filter((n) => n.likelyInput && n.onScreen).length;
   lines.push(
     `nodes: ${shown.length} shown / ${table.nodes.length} total / raw=${table.rawCount}` +
       ` | onScreen=${table.nodes.length - offScreen} offScreen=${offScreen} tappableOnScreen=${tappableOn}` +
+      (inputCount ? ` likelyInput=${inputCount}` : "") +
       (onScreenOnly ? " | filter=onScreenOnly" : "") +
       (searchMeta ? ` | ${searchMeta}` : "") +
       (omitted ? ` | truncated=+${omitted}` : ""),
   );
   lines.push(
-    "hint: After tap/swipe/type, refs are invalid — call screen_snapshot again (or use resnapshot). Use only refs from THIS generation. Do not parallelize app act tools (tap/swipe/type); only App+SB dual is parallel-safe.",
+    "hint: After tap/swipe/type, refs are invalid — call screen_snapshot again (or use resnapshot). Use only refs from THIS generation. Prefer [input] refs for smart_type_text. Do not parallelize app act tools (tap/swipe/type); only App+SB dual is parallel-safe.",
   );
 
   if (opts.showDiff && opts.prev) {
@@ -265,6 +331,7 @@ export function formatSnapshot(
   for (const n of shown) {
     const short = n.text.length > 80 ? `${n.text.slice(0, 77)}...` : n.text;
     const flags: string[] = [];
+    if (n.likelyInput) flags.push("input");
     if (!n.tappable) flags.push("not-tappable");
     else if (!n.onScreen) flags.push("off-screen");
     const flagStr = flags.length ? ` [${flags.join(",")}]` : "";

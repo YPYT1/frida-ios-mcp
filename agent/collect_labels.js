@@ -55,22 +55,24 @@ export function collectTextsWithFrames() {
                 } catch(_e2) { return null; }
             }
         }
-        function tryAdd(t, frame) {
+        function tryAdd(t, frame, view) {
             if (!t || t === 'null' || t.length === 0 || t.length > 2000) return;
             const key = t + (frame ? `|${frame.cx}|${frame.cy}` : '');
             if (seen.has(key)) return;
             seen.add(key);
             const codes = [];
             for (let i = 0; i < t.length; i++) codes.push(t.charCodeAt(i));
-            result.push({ codes, frame });
+            let className = '';
+            try { className = String(view.$className || ''); } catch (_e) {}
+            result.push({ codes, frame, className });
         }
         function walk(view) {
             const frame = getFrame(view);
             try {
-                try { tryAdd(view.text().toString(), frame); } catch(_e) {}
+                try { tryAdd(view.text().toString(), frame, view); } catch(_e) {}
                 try {
                     const at = view.attributedText();
-                    if (at && !at.handle.isNull()) tryAdd(at.string().toString(), frame);
+                    if (at && !at.handle.isNull()) tryAdd(at.string().toString(), frame, view);
                 } catch(_e) {}
             } catch (_e) {}
             try {
