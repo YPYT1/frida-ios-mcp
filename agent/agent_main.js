@@ -20,7 +20,7 @@ import { findView, findViews, dumpTree, dumpLoginGate, windowFrame } from './sha
 import { collectTexts, collectTextsWithFrames, setTextAtPoint, findButtons, dumpAllViewStates } from './collect_labels.js';
 import { setOtpCode } from './otp_input/otp_input.js';
 import { netEnable, netDisable, netClear, netDump, netStatus } from './net_capture.js';
-import { sbAlertList, sbAlertTap, sbAlertDismiss } from './springboard/sb_alerts.js';
+import { sbAlertList, sbAlertTap, sbAlertDismiss, sbAlertTrigger } from './springboard/sb_alerts.js';
 
 rpc.exports = {
     // --- 存活探针（MCP / 宿主勿用错误方法名当探针）---
@@ -71,6 +71,7 @@ rpc.exports = {
     sbAlertList:    ()                   => sbAlertList(),
     sbAlertTap:     (title)              => sbAlertTap(title),
     sbAlertDismiss: (policy)             => sbAlertDismiss(policy),
+    sbAlertTrigger: ()                   => sbAlertTrigger(),
 };
 
 send({ type: 'ready' });

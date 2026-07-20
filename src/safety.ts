@@ -121,6 +121,8 @@ export const RPC_CALL_WHITELIST = new Set([
   "sb_alert_tap",
   "sbAlertDismiss",
   "sb_alert_dismiss",
+  "sbAlertTrigger",
+  "sb_alert_trigger",
 ]);
 
 export function assertWhitelistedRpc(name: string): void {

@@ -119,17 +119,20 @@ export async function handleMethod(
         return jsonResult(r);
       }
       case "session_close": {
-        // Default: also tear down SpringBoard so status is not orphan-alive
         const closeSpringBoard = params.closeSpringBoard !== false;
         const r = await sessionStore.close({ closeSpringBoard });
         return jsonResult({
           open: false,
           message: closeSpringBoard
             ? "app + SpringBoard sessions closed"
-            : "app session closed (SpringBoard kept)",
+            : "app session closed; SpringBoard kept intentionally",
           ...r,
           status: sessionStore.status(),
         });
+      }
+      case "sb_alert_trigger": {
+        const r = await sessionStore.sbAlertTrigger();
+        return jsonResult(r);
       }
       case "ping": {
         const pong = await sessionStore.ping();
@@ -364,9 +367,10 @@ export async function handleMethod(
         const r = await sessionStore.netDump({
           limit: params.limit != null ? Number(params.limit) : undefined,
           query: typeof params.query === "string" ? params.query : undefined,
-          // Default redact=true for open-source safety
           redact: params.redact === false ? false : true,
           summaryOnly: Boolean(params.summaryOnly),
+          includeDataUrls: Boolean(params.includeDataUrls),
+          includeBinaryBodies: Boolean(params.includeBinaryBodies),
         });
         return jsonResult(r);
       }

@@ -198,6 +198,62 @@ export function sbAlertTap(title) {
     });
 }
 
+/**
+ * Trigger a synthetic system alert via SBAlertItemTestRecipe (iOS 16 jailbreak path).
+ * Used only for probing sb_alert_list / sb_alert_tap — not production UX.
+ */
+export function sbAlertTrigger() {
+    return new Promise(function (resolve) {
+        ObjC.schedule(ObjC.mainQueue, function () {
+            try {
+                const Recipe = ObjC.classes.SBAlertItemTestRecipe;
+                if (!Recipe) {
+                    resolve({
+                        ok: false,
+                        error: 'SBAlertItemTestRecipe not found (unsupported iOS / not SpringBoard)',
+                    });
+                    return;
+                }
+                let recipe = null;
+                try {
+                    recipe = Recipe.alloc().init();
+                } catch (_e) {
+                    try {
+                        recipe = Recipe.new();
+                    } catch (_e2) {
+                        resolve({ ok: false, error: 'failed to alloc SBAlertItemTestRecipe' });
+                        return;
+                    }
+                }
+                if (!recipe || recipe.handle.isNull()) {
+                    resolve({ ok: false, error: 'recipe null' });
+                    return;
+                }
+                // Verified path on iOS 16: handleVolumeIncrease creates a dismissable test alert
+                if (typeof recipe.handleVolumeIncrease === 'function') {
+                    recipe.handleVolumeIncrease();
+                } else if (typeof recipe['- handleVolumeIncrease'] !== 'undefined') {
+                    recipe.handleVolumeIncrease();
+                } else {
+                    resolve({
+                        ok: false,
+                        error: 'handleVolumeIncrease missing on SBAlertItemTestRecipe',
+                    });
+                    return;
+                }
+                resolve({
+                    ok: true,
+                    method: 'SBAlertItemTestRecipe.handleVolumeIncrease',
+                    titleHint: 'Dismiss / test alert (varies by iOS)',
+                    hint: 'Next: sb_alert_list → sb_alert_tap("Dismiss") or matching button title',
+                });
+            } catch (e) {
+                resolve({ ok: false, error: String(e.message || e) });
+            }
+        });
+    });
+}
+
 export function sbAlertDismiss(policy) {
     // policy: 'deny' | 'default' | 'first'
     const pol = policy || 'deny';

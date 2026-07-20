@@ -66,10 +66,18 @@ pnpm build
 |---------|------|
 | **MCP** (`frida-mcp`) | Interactive AI/human probe (main) |
 | **CLI** (`cli/frida-ios.mjs`) | Scripts / CI / one-shot |
-| **Core** (`src/backend.ts` + `session`) | Shared — both call `handleMethod` |
+| **Core** (`src/backend.ts` + `session`) | Shared API — **not** shared memory by default |
+
+### MCP vs CLI sessions (read this)
+
+1. **Embedded MCP** = its own Node process + own `sessionStore` (Cursor/Grok default).
+2. **CLI** = another process; **cannot** see the MCP session.
+3. **To share one Frida session:** run the **daemon**, then set `FRIDA_MCP_MODE=daemon` on **both** MCP and CLI.
+4. Without daemon, open/close in CLI is independent of Cursor.
+5. App acts are **serialized** in-process (AI parallel tap+swipe will queue, not race).
 
 ```bash
-# CLI (after build)
+# CLI (after build) — separate process unless daemon
 pnpm cli help
 pnpm cli open --bundleId com.ss.iphone.ugc.Ame --withSpringBoard
 pnpm cli call wait --ms 4000
@@ -78,8 +86,17 @@ pnpm cli call net_dump --summaryOnly
 pnpm cli close
 ```
 
-**Open-source safety:** `net_dump` **redacts** Authorization / Cookie / `*Token*` by default.  
-Use `redact:false` only on trusted local machines — never paste raw dumps into issues/PRs.
+**Open-source safety (`net_dump` defaults):**
+- Redact Authorization / Cookie / `*Token*`
+- **Drop** `data:` URLs (base64 images)
+- **Fold** binary / octet-stream body previews
+- `summaryOnly: true` for host counts only  
+- `redact:false` / `includeDataUrls` / `includeBinaryBodies` only on trusted local machines — never paste raw dumps into issues/PRs.
+
+**Typing:** nav labels /「有什麼想法」「有什麼好事」are **not** text fields (`NOT_INPUT`). Search real fields: `search: "搜尋|Search|留言"`.
+
+**Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): only registered if `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
+
 ## Modes
 
 ### Embedded (default, recommended for Grok/Cursor trial)
@@ -92,10 +109,10 @@ node dist/index.js
 pnpm dev
 ```
 
-### Daemon + thin MCP (NSSM)
+### Daemon + thin MCP (NSSM) — shared session with CLI
 
 1. Daemon holds Frida session on `127.0.0.1:18765`
-2. stdio MCP forwards tools when `FRIDA_MCP_MODE=daemon` (or `FRIDA_MCP_DAEMON=1`)
+2. stdio MCP **and** CLI forward when `FRIDA_MCP_MODE=daemon` (or `FRIDA_MCP_DAEMON=1`)
 
 ```bash
 pnpm start:daemon

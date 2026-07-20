@@ -72,8 +72,16 @@ function toParams(parsed) {
   return params;
 }
 
+const SESSION_HINT = `
+Sessions (CLI vs MCP):
+  - This CLI process has its OWN sessionStore — it does NOT see Cursor/Grok MCP sessions.
+  - Embedded MCP = another process, separate inject/state.
+  - To SHARE one Frida session: start the daemon, then set FRIDA_MCP_MODE=daemon for both MCP and CLI.
+  - Without daemon, open/close here only affects this CLI process.
+`.trim();
+
 const HELP = `
-frida-ios CLI (shares MCP backend)
+frida-ios CLI (same handleMethod as MCP; separate process session by default)
 
   help                         Show this help
   call <method> [flags]        Invoke any backend method
@@ -84,7 +92,7 @@ frida-ios CLI (shares MCP backend)
   tap --ref g1t1 | --x N --y N
   swipe --direction up
   net-dump [--summaryOnly] [--redact false]
-  sb-list | sb-ensure | sb-close
+  sb-list | sb-ensure | sb-trigger | sb-close
 
 Examples:
   node cli/frida-ios.mjs open --bundleId com.ss.iphone.ugc.Ame --withSpringBoard
@@ -93,9 +101,11 @@ Examples:
   node cli/frida-ios.mjs call net_dump --summaryOnly
   node cli/frida-ios.mjs close
 
+${SESSION_HINT}
+
 Notes:
-  - net_dump redacts secrets by default (open-source safe).
-  - Do not parallelize app acts; App+SB dual is OK.
+  - net_dump: redact + drop data: URLs + fold binary by default.
+  - App acts are serialized in-process; App+SB dual parallel is OK.
   - Requires: pnpm build  (uses dist/backend.js)
 `.trim();
 
@@ -142,7 +152,21 @@ async function main() {
     case "status":
       method = "session_status";
       params = {};
-      break;
+      {
+        const result = await handleMethod(method, params);
+        const text = result.content?.[0]?.text ?? JSON.stringify(result);
+        print(text);
+        try {
+          const j = JSON.parse(text);
+          if (!j.open && !j.alive) {
+            print("\n" + SESSION_HINT);
+          }
+        } catch {
+          /* ignore */
+        }
+        if (result.isError) process.exitCode = 1;
+        return;
+      }
     case "dual-ping":
     case "dual_ping":
       method = "dual_ping";
@@ -172,6 +196,11 @@ async function main() {
       break;
     case "sb-ensure":
       method = "sb_ensure";
+      params = {};
+      break;
+    case "sb-trigger":
+    case "sb_alert_trigger":
+      method = "sb_alert_trigger";
       params = {};
       break;
     case "sb-close":

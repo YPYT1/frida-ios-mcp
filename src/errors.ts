@@ -81,7 +81,7 @@ export function mapError(err: unknown): {
       ok: false,
       code: "STALE_REF",
       error: message,
-      recovery: ["screen_snapshot", "use new ref from THIS generation only"],
+      recovery: ["screen_snapshot", "use only refs from the latest generation"],
     };
   }
   if (/no first responder|no_focus|not focused/i.test(m)) {
@@ -95,14 +95,14 @@ export function mapError(err: unknown): {
       ],
     };
   }
-  if (/not_input|not an input|not a text field|composer chrome/i.test(m)) {
+  if (/not_input|not an input|not a text field|composer chrome|chrome\/chip/i.test(m)) {
     return {
       ok: false,
       code: "NOT_INPUT",
       error: message,
       recovery: [
-        "screen_snapshot search for real field (搜尋/Search/placeholder)",
-        "avoid status chips like 有什麼好事",
+        'screen_snapshot({ search: "搜尋|搜索|Search|留言|评论" })',
+        "avoid nav/tabs/chips (首頁/有什麼好事)",
         "first_responder before type_text",
       ],
     };
@@ -157,24 +157,32 @@ export function mapError(err: unknown): {
 
 export const PROBE_HELP = {
   loop: [
-    "session_open { bundleId }",
+    "session_open { bundleId, withSpringBoard?: true }",
     "wait { ms: 3000-5000 }  // TikTok: always",
     "screen_snapshot { onScreenOnly: true, limit: 40 }",
-    "tap | swipe | smart_type_text  // resnapshot defaults true",
+    "tap | swipe | smart_type_text  // resnapshot defaults true; SERIAL on app channel",
     "screen_snapshot if resnapshot=false",
   ],
   prefer: {
     type: "smart_type_text when field needs focus; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
     system_alert:
-      "sb_alert_list → sb_alert_tap/dismiss(policy=deny for location) → screen_snapshot",
+      "sb_alert_trigger (test) → sb_alert_list → sb_alert_tap/dismiss → screen_snapshot",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
   },
+  typing: {
+    steps: [
+      'screen_snapshot({ search: "搜尋|搜索|Search|留言|评论|輸入" })',
+      "Use only real field refs (UITextField-like). Nav/tabs/chips → NOT_INPUT",
+      "smart_type_text({ text, ref }) — retryOnFail default false",
+      "Avoid: 首頁/好友/發佈/有什麼好事/有什麼想法 (not inputs)",
+      "If unsure: first_responder after tap; require canInsertText before type_text",
+    ],
+  },
   avoid: [
-    "rpc_call (debug only)",
-    "dump_modal (debug; blocked on TikTok)",
-    "set_text_at_point (not humanized; use type_text/smart_type_text)",
-    "human_type (alias of type_text — use type_text)",
+    "rpc_call / dump_modal / set_text_at_point — DEBUG only (set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1)",
+    "parallel app acts (tap+swipe together) — engine serializes but still wasteful",
+    "human_type alias — use type_text",
   ],
   defaults: {
     session_mode: "spawn-only on this stack",
@@ -183,14 +191,19 @@ export const PROBE_HELP = {
     act_resnapshot: true,
     type_perCharDelayMs: 90,
     dual_parallel: true,
+    net_dump: "redact + drop data: URLs + fold binary bodies",
   },
   dual: {
     model: "App session (live) + SpringBoard session (sbLive) held together",
-    locks: "Separate appLock / sbLock — App+SB concurrent OK; do NOT parallelize app acts",
-    open: "session_open({ withSpringBoard: true }) or sb_ensure / first sb_alert_list",
+    locks: "appLock serializes ALL app acts; sbLock separate — App+SB concurrent OK",
+    open: "session_open({ withSpringBoard: true }) or sb_ensure",
     prove: "dual_ping",
-    close: "session_close closes App+SB by default (no orphan SB)",
-    note: "Only App↔SB dual is parallel-safe. Never parallel tap+swipe on the same app session.",
+    close: "session_close closes both by default; closeSpringBoard:false keeps SB intentionally",
+  },
+  sessions: {
+    mcp_embedded: "Each MCP process has its own sessionStore (not shared with CLI)",
+    cli: "CLI is another process — cannot see MCP session unless daemon mode",
+    share: "Run daemon; set FRIDA_MCP_MODE=daemon on both MCP and CLI",
   },
   search: {
     default: "substring",
@@ -199,7 +212,8 @@ export const PROBE_HELP = {
   },
   net: {
     sticky: false,
-    note: "Each net_enable resets urlFilter to empty unless you pass urlFilter again",
+    quiet:
+      "Default drops data: URLs and folds binary bodies; pass includeDataUrls/includeBinaryBodies true to expand",
   },
   hint: "After any UI act, refs from previous generation are invalid.",
 };

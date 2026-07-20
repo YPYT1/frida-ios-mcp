@@ -44,6 +44,8 @@ export type SessionStatus = {
   recovery?: string[];
   loginStateRisk?: boolean;
   springboardAlive?: boolean;
+  /** true when user kept SB via closeSpringBoard:false */
+  springboardKept?: boolean;
   /** Dual-session model: app + SB held together; RPCs use separate locks */
   dualParallel?: boolean;
   springboardPid?: number;
@@ -57,6 +59,8 @@ class SessionStore {
   private live: LiveSession | null = null;
   /** Parallel SpringBoard session (attach by process name) — does not replace app live */
   private sbLive: LiveSession | null = null;
+  /** User asked closeSpringBoard:false — SB kept on purpose (not an error state) */
+  private sbKeepIntentional = false;
   private snapshot: SnapshotTable | null = null;
   /** Previous texts snapshot for showDiff */
   private prevSnapshot: SnapshotTable | null = null;
@@ -82,20 +86,26 @@ class SessionStore {
 
   status(): SessionStatus {
     if (!this.live) {
-      const sbOrphan = !!this.sbLive?.alive;
+      const sbAlive = !!this.sbLive?.alive;
+      const intentionalKeep = sbAlive && this.sbKeepIntentional;
       return {
         open: false,
         alive: false,
         injected: false,
         hasSnapshot: false,
-        springboardAlive: sbOrphan,
+        springboardAlive: sbAlive,
         springboardPid: this.sbLive?.alive ? this.sbLive.pid : undefined,
+        springboardKept: intentionalKeep || undefined,
         dualParallel: true,
-        hint: sbOrphan
-          ? "App session closed but SpringBoard still attached (orphan). Call sb_close or session_close."
-          : undefined,
-        recovery: sbOrphan
-          ? ["sb_close", "session_open"]
+        hint: intentionalKeep
+          ? "SpringBoard kept intentionally; call sb_close when done."
+          : sbAlive
+            ? "App session ended but SpringBoard still attached unexpectedly. Call sb_close."
+            : undefined,
+        recovery: sbAlive
+          ? intentionalKeep
+            ? ["sb_close when finished", "or session_open for a new app"]
+            : ["sb_close", "session_open"]
           : ["session_open", "wait(3000-5000)", "screen_snapshot"],
       };
     }
@@ -178,7 +188,8 @@ class SessionStore {
   ): Promise<string | undefined> {
     if (resnapshot === false) return undefined;
     await new Promise((r) => setTimeout(r, settleMs));
-    const { text } = await this.screenSnapshot({ ...SessionStore.DEFAULT_SNAP });
+    // Caller must already hold appLock (re-entrant screenSnapshotBody)
+    const { text } = await this.screenSnapshotBody({ ...SessionStore.DEFAULT_SNAP });
     return text;
   }
 
@@ -355,13 +366,15 @@ class SessionStore {
   }
 
   /**
-   * Close app session. By default also tears down SpringBoard (no orphan SB).
-   * Pass closeSpringBoard:false to keep SB for next app open.
+   * Close app session. Default also tears down SpringBoard.
+   * closeSpringBoard:false keeps SB intentionally (springboardKept, not an error).
    */
   async close(opts: { closeSpringBoard?: boolean } = {}): Promise<{
     appClosed: boolean;
     springboardClosed: boolean;
     springboardAlive: boolean;
+    springboardKept?: boolean;
+    hint?: string;
   }> {
     const closeSb = opts.closeSpringBoard !== false;
     await this.appLock.run(async () => {
@@ -370,17 +383,30 @@ class SessionStore {
       this.snapshot = null;
       this.prevSnapshot = null;
       this.lastTreeText = null;
+      this.lastSnapMeta = null;
       await closeLiveSession(live);
     });
     let springboardClosed = false;
     if (closeSb) {
+      this.sbKeepIntentional = false;
       await this.sbClose();
       springboardClosed = true;
+      return {
+        appClosed: true,
+        springboardClosed: true,
+        springboardAlive: false,
+        hint: "App and SpringBoard sessions closed.",
+      };
     }
+    this.sbKeepIntentional = !!this.sbLive?.alive;
     return {
       appClosed: true,
-      springboardClosed,
+      springboardClosed: false,
       springboardAlive: !!this.sbLive?.alive,
+      springboardKept: this.sbKeepIntentional,
+      hint: this.sbKeepIntentional
+        ? "SpringBoard kept intentionally; call sb_close when done."
+        : "App closed; SpringBoard was not attached.",
     };
   }
 
@@ -388,12 +414,18 @@ class SessionStore {
     await this.sbLock.run(async () => {
       const sb = this.sbLive;
       this.sbLive = null;
+      this.sbKeepIntentional = false;
       await closeLiveSession(sb);
     });
   }
 
+  /** Entire app-session op under one lock (serializes AI parallel tap/swipe). */
+  private withAppOp<T>(fn: () => Promise<T>): Promise<T> {
+    return this.appLock.run(fn);
+  }
+
   async ping(): Promise<string> {
-    return this.appLock.run(async () => {
+    return this.withAppOp(async () => {
       const live = this.requireLive();
       try {
         const r = await callRpc(live.script, "ping");
@@ -406,7 +438,8 @@ class SessionStore {
   }
 
   async rpc(name: string, args: unknown[] = []): Promise<unknown> {
-    return this.appLock.run(async () => {
+    // Re-entrant when already inside withAppOp (ALS)
+    return this.withAppOp(async () => {
       const live = this.requireLive();
       assertSafeRpc(live.bundleId, name);
       try {
@@ -519,6 +552,12 @@ class SessionStore {
   }
 
   async screenSnapshot(
+    opts: SnapshotRequest = {},
+  ): Promise<{ text: string; table: SnapshotTable }> {
+    return this.withAppOp(async () => this.screenSnapshotBody(opts));
+  }
+
+  private async screenSnapshotBody(
     opts: SnapshotRequest = {},
   ): Promise<{ text: string; table: SnapshotTable }> {
     const live = this.requireLive();
@@ -653,11 +692,13 @@ class SessionStore {
     /** Default true: auto screen_snapshot after act */
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
-    const { x, y } = this.resolveTapPoint(opts);
-    const result = await this.rpc("tap", [x, y]);
-    this.snapshot = null;
-    const snapshot = await this.maybeResnapshot(opts.resnapshot);
-    return this.actEnvelope(result, snapshot, { action: "tap", at: { x, y } });
+    return this.withAppOp(async () => {
+      const { x, y } = this.resolveTapPoint(opts);
+      const result = await this.rpc("tap", [x, y]);
+      this.snapshot = null;
+      const snapshot = await this.maybeResnapshot(opts.resnapshot);
+      return this.actEnvelope(result, snapshot, { action: "tap", at: { x, y } });
+    });
   }
 
   async doubleTap(opts: {
@@ -667,12 +708,14 @@ class SessionStore {
     gapMs?: number;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
-    const { x, y } = this.resolveTapPoint(opts);
-    const gapMs = opts.gapMs ?? 140;
-    const result = await this.rpc("doubleTap", [x, y, gapMs]);
-    this.snapshot = null;
-    const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
-    return this.actEnvelope(result, snapshot, { action: "double_tap", at: { x, y } });
+    return this.withAppOp(async () => {
+      const { x, y } = this.resolveTapPoint(opts);
+      const gapMs = opts.gapMs ?? 140;
+      const result = await this.rpc("doubleTap", [x, y, gapMs]);
+      this.snapshot = null;
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
+      return this.actEnvelope(result, snapshot, { action: "double_tap", at: { x, y } });
+    });
   }
 
   async setOtp(opts: { code: string; source?: string }): Promise<unknown> {
@@ -796,6 +839,18 @@ class SessionStore {
     };
   }
 
+  async sbAlertTrigger(): Promise<unknown> {
+    const r = (await this.sbRpc("sbAlertTrigger")) as Record<string, unknown>;
+    return {
+      ...r,
+      appSession: this.appSessionBrief(),
+      springboardAlive: !!this.sbLive?.alive,
+      next: r.ok
+        ? 'sb_alert_list → sb_alert_tap("Dismiss" or listed title)'
+        : "Check SpringBoard attach (sb_ensure) and iOS version support",
+    };
+  }
+
   async swipe(opts: {
     direction?: "up" | "down" | "left" | "right";
     x0?: number;
@@ -805,25 +860,27 @@ class SessionStore {
     duration?: number;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
-    const dur = opts.duration ?? 0.4;
-    this.snapshot = null;
-    let result: unknown;
-    if (
-      opts.x0 != null &&
-      opts.y0 != null &&
-      opts.x1 != null &&
-      opts.y1 != null
-    ) {
-      result = await this.rpc("swipePath", [opts.x0, opts.y0, opts.x1, opts.y1, dur]);
-    } else if (!opts.direction) {
-      throw new ProbeError("INVALID_ARGS", "swipe requires direction or x0,y0,x1,y1", [
-        "pass direction or path",
-      ]);
-    } else {
-      result = await this.rpc("swipe", [opts.direction, dur]);
-    }
-    const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
-    return this.actEnvelope(result, snapshot, { action: "swipe" });
+    return this.withAppOp(async () => {
+      const dur = opts.duration ?? 0.4;
+      this.snapshot = null;
+      let result: unknown;
+      if (
+        opts.x0 != null &&
+        opts.y0 != null &&
+        opts.x1 != null &&
+        opts.y1 != null
+      ) {
+        result = await this.rpc("swipePath", [opts.x0, opts.y0, opts.x1, opts.y1, dur]);
+      } else if (!opts.direction) {
+        throw new ProbeError("INVALID_ARGS", "swipe requires direction or x0,y0,x1,y1", [
+          "pass direction or path",
+        ]);
+      } else {
+        result = await this.rpc("swipe", [opts.direction, dur]);
+      }
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
+      return this.actEnvelope(result, snapshot, { action: "swipe" });
+    });
   }
 
   /**
@@ -851,40 +908,42 @@ class SessionStore {
     perCharDelayMs?: number;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
-    const text = opts.text;
-    if (!text) throw new ProbeError("INVALID_ARGS", "text is required", ["type_text"]);
-    const perCharDelayMs =
-      opts.perCharDelayMs != null && Number.isFinite(opts.perCharDelayMs)
-        ? Math.max(0, Number(opts.perCharDelayMs))
-        : SessionStore.PER_CHAR_DELAY_MS;
+    return this.withAppOp(async () => {
+      const text = opts.text;
+      if (!text) throw new ProbeError("INVALID_ARGS", "text is required", ["type_text"]);
+      const perCharDelayMs =
+        opts.perCharDelayMs != null && Number.isFinite(opts.perCharDelayMs)
+          ? Math.max(0, Number(opts.perCharDelayMs))
+          : SessionStore.PER_CHAR_DELAY_MS;
 
-    await this.humanPause(80, 200);
-    let frida: unknown;
-    try {
-      frida = await this.rpc("inputText", [text, perCharDelayMs]);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (/no first responder/i.test(msg)) {
-        throw new ProbeError(
-          "NO_FOCUS",
-          `${msg}. Field not focused.`,
-          ["smart_type_text with ref or x,y", "or tap input then type_text"],
-        );
+      await this.humanPause(80, 200);
+      let frida: unknown;
+      try {
+        frida = await this.rpc("inputText", [text, perCharDelayMs]);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/no first responder/i.test(msg)) {
+          throw new ProbeError(
+            "NO_FOCUS",
+            `${msg}. Field not focused.`,
+            ["smart_type_text with ref or x,y", "or tap input then type_text"],
+          );
+        }
+        throw e;
       }
-      throw e;
-    }
-    await this.humanPause(150, 400);
-    this.snapshot = null;
-    const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
-    return {
-      ...this.actEnvelope(frida, snapshot, {
-        action: "TypeTextAction",
-        text,
-        perCharDelayMs,
-        humanized: true,
-      }),
-      note: "拟人逐字: base + random jitter inside agent inputText (default base 90ms).",
-    };
+      await this.humanPause(150, 400);
+      this.snapshot = null;
+      const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
+      return {
+        ...this.actEnvelope(frida, snapshot, {
+          action: "TypeTextAction",
+          text,
+          perCharDelayMs,
+          humanized: true,
+        }),
+        note: "拟人逐字: base + random jitter inside agent inputText (default base 90ms).",
+      };
+    });
   }
 
   /**
@@ -907,7 +966,7 @@ class SessionStore {
     if (!t) return false;
     // Short nav / tab / CTA labels
     if (
-      /^(首頁|好友|收信匣|個人資料|發佈|關注中|為您推薦|搜尋|搜索|取消|完成|發送|发佈)$/i.test(
+      /^(首頁|好友|收信匣|個人資料|發佈|關注中|為您推薦|搜尋|搜索|取消|完成|發送|发佈|一般|設定|设置|Wi-Fi|藍牙|通知)$/i.test(
         t,
       )
     ) {
@@ -933,6 +992,19 @@ class SessionStore {
     perCharDelayMs?: number;
     waitKeyboardMs?: number;
     /** Default false — retry often kills TikTok after bad first tap */
+    retryOnFail?: boolean;
+    resnapshot?: boolean;
+  }): Promise<Record<string, unknown>> {
+    return this.withAppOp(async () => this.smartTypeTextBody(opts));
+  }
+
+  private async smartTypeTextBody(opts: {
+    text: string;
+    ref?: string;
+    x?: number;
+    y?: number;
+    perCharDelayMs?: number;
+    waitKeyboardMs?: number;
     retryOnFail?: boolean;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
@@ -1204,13 +1276,22 @@ class SessionStore {
       redact?: boolean;
       /** If true, only return host counts (low noise) */
       summaryOnly?: boolean;
+      /** Include data:image/... base64 URLs. Default false. */
+      includeDataUrls?: boolean;
+      /** Include binary/octet-stream body previews. Default false. */
+      includeBinaryBodies?: boolean;
     } = {},
   ): Promise<unknown> {
-    const { redactNetDump, summarizeNetHosts } = await import("./redact.js");
+    const { quietNetDump, summarizeNetHosts } = await import("./redact.js");
     const raw = (await this.rpc("netDump", [
       { limit: options.limit, query: options.query },
     ])) as Record<string, unknown>;
     const redact = options.redact !== false;
+    const quietOpts = {
+      redact,
+      includeDataUrls: options.includeDataUrls === true,
+      includeBinaryBodies: options.includeBinaryBodies === true,
+    };
     if (options.summaryOnly) {
       const entries = Array.isArray(raw.entries) ? raw.entries : [];
       const summary = summarizeNetHosts(entries);
@@ -1221,10 +1302,10 @@ class SessionStore {
         enabled: raw.enabled,
         count: raw.count,
         ...summary,
-        note: "Host summary only. Full dump: net_dump without summaryOnly (still redacted by default).",
+        note: "Host summary only (data: counted as (data-url)). Full: net_dump without summaryOnly.",
       };
     }
-    return redactNetDump(raw, redact);
+    return quietNetDump(raw, quietOpts);
   }
 }
 

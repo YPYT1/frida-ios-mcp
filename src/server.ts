@@ -138,12 +138,12 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "session_close",
-    "Close app Frida session. Default also closes SpringBoard (no orphan sbLive). Set closeSpringBoard=false to keep SB.",
+    "Close app session. Default also closes SpringBoard. closeSpringBoard=false keeps SB intentionally (springboardKept).",
     {
       closeSpringBoard: z
         .boolean()
         .optional()
-        .describe("Default true: also sb_close. false keeps SpringBoard attached."),
+        .describe("Default true. false = keep SpringBoard for later (intentional, not an error)."),
     },
     async ({ closeSpringBoard }) =>
       toolResult(await run("session_close", { closeSpringBoard })),
@@ -271,41 +271,51 @@ export function createMcpServer(): McpServer {
     async ({ code, source }) => toolResult(await run("set_otp", { code, source })),
   );
 
-  server.tool(
-    "set_text_at_point",
-    "[DEBUG] setText at point — NOT 拟人. Daily probe: use type_text / smart_type_text instead.",
-    {
-      text: z.string(),
-      ref: z.string().optional(),
-      x: z.number().optional(),
-      y: z.number().optional(),
-    },
-    async ({ text, ref, x, y }) =>
-      toolResult(await run("set_text_at_point", { text, ref, x, y })),
-  );
+  // Debug tools: set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 to register (reduces AI misuse)
+  if (process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS === "1") {
+    server.tool(
+      "set_text_at_point",
+      "[DEBUG] setText at point — NOT 拟人. Prefer type_text / smart_type_text.",
+      {
+        text: z.string(),
+        ref: z.string().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+      },
+      async ({ text, ref, x, y }) =>
+        toolResult(await run("set_text_at_point", { text, ref, x, y })),
+    );
 
-  server.tool(
-    "dump_modal",
-    "[DEBUG] dumpModalView. BLOCKED on TikTok. Daily probe: do not use.",
-    {},
-    async () => toolResult(await run("dump_modal")),
-  );
+    server.tool(
+      "dump_modal",
+      "[DEBUG] dumpModalView. BLOCKED on TikTok. Daily probe: do not use.",
+      {},
+      async () => toolResult(await run("dump_modal")),
+    );
 
-  server.tool(
-    "rpc_call",
-    "[DEBUG] Whitelisted agent RPC only. Daily probe: do not use — prefer first-class tools + probe_help.",
-    {
-      name: z.string().describe("RPC name e.g. windowFrame"),
-      args: z.array(z.unknown()).optional(),
-    },
-    async ({ name, args }) => toolResult(await run("rpc_call", { name, args })),
-  );
+    server.tool(
+      "rpc_call",
+      "[DEBUG] Whitelisted agent RPC. Prefer first-class tools + probe_help.",
+      {
+        name: z.string().describe("RPC name e.g. windowFrame"),
+        args: z.array(z.unknown()).optional(),
+      },
+      async ({ name, args }) => toolResult(await run("rpc_call", { name, args })),
+    );
+  }
 
   server.tool(
     "sb_alert_list",
-    "List SpringBoard system alerts (separate SB attach). Returns appSession alive. After dismiss → app screen_snapshot.",
+    "List SpringBoard system alerts (separate SB attach). Returns appSession. After dismiss → app screen_snapshot.",
     {},
     async () => toolResult(await run("sb_alert_list")),
+  );
+
+  server.tool(
+    "sb_alert_trigger",
+    "Create a test system alert via SBAlertItemTestRecipe.handleVolumeIncrease (probe only). Next: sb_alert_list → sb_alert_tap.",
+    {},
+    async () => toolResult(await run("sb_alert_trigger")),
   );
 
   server.tool(
@@ -453,8 +463,8 @@ export function createMcpServer(): McpServer {
   server.tool(
     "net_dump",
     [
-      "Dump captured HTTP(S). DEFAULT redacts Authorization/Cookie/*Token* (open-source safe).",
-      "redact:false only on trusted local machines. summaryOnly:true → host counts only.",
+      "Quiet HTTP dump. Default: redact secrets, DROP data: URLs, FOLD binary bodies.",
+      "includeDataUrls/includeBinaryBodies default false. summaryOnly=host counts. redact=false only locally.",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),
@@ -462,14 +472,18 @@ export function createMcpServer(): McpServer {
       redact: z
         .boolean()
         .optional()
-        .describe("Default true. false = raw secrets (dangerous for logs/PRs)"),
-      summaryOnly: z
+        .describe("Default true. false = raw secrets (never for issues/PRs)"),
+      summaryOnly: z.boolean().optional().describe("Host aggregation only"),
+      includeDataUrls: z
         .boolean()
         .optional()
-        .describe("If true, only host aggregation (low noise)"),
+        .describe("Default false — drop data:image base64 URLs"),
+      includeBinaryBodies: z
+        .boolean()
+        .optional()
+        .describe("Default false — fold octet-stream / binary previews"),
     },
-    async ({ limit, query, redact, summaryOnly }) =>
-      toolResult(await run("net_dump", { limit, query, redact, summaryOnly })),
+    async (args) => toolResult(await run("net_dump", args)),
   );
 
   return server;
