@@ -339,9 +339,9 @@ export function createMcpServer(): McpServer {
   server.tool(
     "sb_alert_dismiss",
     [
-      "Dismiss SB alert. Default policy=deny (location-safe). Default all=false: one layer.",
-      "Stacked Dismiss layers: all=true (loops until clear or maxRounds, default 5). Returns cleared/remaining/rounds.",
-      "Do not parallel sb_alert_tap + dismiss. Then app screen_snapshot.",
+      "Dismiss SB alert. Default policy=deny. all=false: one layer after ~300ms settle (trust cleared; empty → cleared:true rounds:0).",
+      "Stacked: all=true (loop until clear or maxRounds=5). Returns cleared/remaining/rounds/needsRetry.",
+      "If needsRetry or cleared=false after settle → re-list or all:true again. Do not parallel tap+dismiss.",
     ].join(" "),
     {
       policy: z.enum(["deny", "default", "first"]).optional().describe("Default deny"),
@@ -488,7 +488,7 @@ export function createMcpServer(): McpServer {
     "net_dump",
     [
       "Quiet HTTP dump. rawCount=buffer; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies/deduped=stats.",
-      "Default: redact, DROP data: URLs, FOLD binary, dedupe method+url (keep first). summaryOnly=host counts.",
+      "Default: redact, DROP data: URLs, FOLD binary, dedupe method+url (keep first; dedupe:false for retry/replay debug). summaryOnly=host counts.",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),
@@ -512,6 +512,79 @@ export function createMcpServer(): McpServer {
         .describe("Default true — keep first entry per method+url"),
     },
     async (args) => toolResult(await run("net_dump", args)),
+  );
+
+  // --- Photos album import/clear (side channel; requires Python + pymobiledevice3) ---
+  server.tool(
+    "photos_ensure",
+    "Spawn+resume Photos.app (com.apple.mobileslideshow), settle ~4s, inject photos agent. Does not close TikTok/app session. May steal foreground briefly.",
+    {
+      udid: z.string().optional(),
+      settleMs: z.number().optional().describe("Default 4000"),
+    },
+    async (args) => toolResult(await run("photos_ensure", args)),
+  );
+
+  server.tool(
+    "media_upload",
+    "AFC upload PC file to /DCIM/100APPLE/{IMG|VID}_XXXX.ext. Needs Python + pymobiledevice3. stage=upload on failure.",
+    {
+      udid: z.string().optional(),
+      localPath: z.string().describe("Absolute path on this PC"),
+      mediaType: z.enum(["image", "video"]),
+    },
+    async (args) => toolResult(await run("media_upload", args)),
+  );
+
+  server.tool(
+    "photos_import",
+    "PhotoKit import already-on-device file (devicePath or remotePath under /DCIM). Host=Photos.app only. Returns localIdentifier.",
+    {
+      udid: z.string().optional(),
+      devicePath: z.string().optional().describe("/var/mobile/Media/DCIM/..."),
+      remotePath: z.string().optional().describe("/DCIM/100APPLE/..."),
+      mediaType: z.enum(["image", "video"]),
+      terminateAfter: z
+        .boolean()
+        .optional()
+        .describe("Default true — kill Photos after import (sqlite friendly)"),
+    },
+    async (args) => toolResult(await run("photos_import", args)),
+  );
+
+  server.tool(
+    "photos_import_file",
+    "One-shot: AFC upload + Photos ensure + PhotoKit import + optional sqlite verify. Preferred for AI. Needs pymobiledevice3.",
+    {
+      udid: z.string().optional(),
+      localPath: z.string().describe("PC file path"),
+      mediaType: z.enum(["image", "video"]),
+      verify: z
+        .boolean()
+        .optional()
+        .describe("Default true — confirm localIdentifier in Photos.sqlite"),
+    },
+    async (args) => toolResult(await run("photos_import_file", args)),
+  );
+
+  server.tool(
+    "photos_list",
+    "Pull Photos.sqlite via AFC; list untrashed image/video (localIdentifier, filename). Not Recently Deleted.",
+    { udid: z.string().optional() },
+    async (args) => toolResult(await run("photos_list", args)),
+  );
+
+  server.tool(
+    "photos_clear",
+    "PhotoKit trash all untrashed image/video (Recently Deleted), verify count=0, optional DCIM source cleanup. needsRetry if leftover.",
+    {
+      udid: z.string().optional(),
+      clearDcim: z
+        .boolean()
+        .optional()
+        .describe("Default true — also rm AFC upload sources under /DCIM/100APPLE"),
+    },
+    async (args) => toolResult(await run("photos_clear", args)),
   );
 
   return server;

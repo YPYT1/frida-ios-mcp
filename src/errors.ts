@@ -43,12 +43,60 @@ export class ProbeError extends Error {
   }
 }
 
+/** Staged media/AFC failures: upload | afc | attach | import | verify */
+export class StageError extends Error {
+  readonly stage: string;
+  readonly recovery: string[];
+  readonly needsRetry: boolean;
+  readonly detail?: unknown;
+  readonly ok = false as const;
+
+  constructor(
+    stage: string,
+    message: string,
+    recovery: string[] = [],
+    opts: { needsRetry?: boolean; detail?: unknown } = {},
+  ) {
+    super(message);
+    this.name = "StageError";
+    this.stage = stage;
+    this.recovery = recovery;
+    this.needsRetry = opts.needsRetry === true;
+    this.detail = opts.detail;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      ok: false as const,
+      stage: this.stage,
+      error: this.message,
+      recovery: this.recovery,
+      needsRetry: this.needsRetry,
+      ...(this.detail !== undefined ? { detail: this.detail } : {}),
+    };
+  }
+}
+
 export function mapError(err: unknown): {
   ok: false;
-  code: ErrorCode;
+  code?: ErrorCode;
+  stage?: string;
   error: string;
   recovery: string[];
+  needsRetry?: boolean;
+  detail?: unknown;
 } {
+  if (err instanceof StageError) {
+    const j = err.toJSON();
+    return {
+      ok: false as const,
+      stage: err.stage,
+      error: err.message,
+      recovery: err.recovery,
+      needsRetry: err.needsRetry,
+      ...(j.detail !== undefined ? { detail: j.detail } : {}),
+    };
+  }
   if (err instanceof ProbeError) {
     return err.toJSON();
   }
@@ -167,8 +215,22 @@ export const PROBE_HELP = {
     type: "smart_type_text when field needs focus; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
     system_alert:
-      "sb_alert_trigger (force default false — no stack) → sb_alert_list (hasAlert, not alertCount alone) → stacked: sb_alert_dismiss({all:true}) | single: sb_alert_tap/dismiss → app screen_snapshot; never parallel tap+dismiss",
+      "sb_alert_trigger (force default false) → sb_alert_list (hasAlert) → single: sb_alert_dismiss (post-settle cleared) | stacked: sb_alert_dismiss({all:true}); if needsRetry re-list/retry all; never parallel tap+dismiss → app screen_snapshot",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
+    media:
+      "photos_import_file({localPath, mediaType}) → photos_list → (publish in TikTok UI) → photos_clear; needs Python+pymobiledevice3; Photos spawn may steal foreground briefly",
+  },
+  media: {
+    primary: "photos_import_file",
+    steps: [
+      "1) photos_import_file({ localPath, mediaType: image|video }) — AFC + Photos PhotoKit",
+      "2) photos_list — confirm localIdentifier in untrashed assets",
+      "3) session_open TikTok → publish UI (not in this MCP yet)",
+      "4) photos_clear — trash untrashed media (Recently Deleted, not permanent wipe)",
+    ],
+    host: "Photos.app only (com.apple.mobileslideshow). Never import via TikTok agent.",
+    afc: "scripts/afc_tool.py via pymobiledevice3; stage=afc/upload if missing",
+    note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db.",
   },
   typing: {
     steps: [
@@ -201,6 +263,8 @@ export const PROBE_HELP = {
     open: "session_open({ withSpringBoard: true }) or sb_ensure",
     prove: "dual_ping",
     close: "session_close closes both by default; closeSpringBoard:false keeps SB intentionally",
+    photos:
+      "photosLock side channel (Photos.app) independent of App/SB; photos_* does not destroy TikTok session",
   },
   sessions: {
     mcp_embedded: "Each MCP process has its own sessionStore (not shared with CLI)",

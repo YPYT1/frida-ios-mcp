@@ -35,16 +35,38 @@ RootHide / TikTok / many jailbreak setups **cannot** use reliable `attach` (touc
 kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject agent → [netEnable?] → resume
 ```
 
-### Dual parallel: App + SpringBoard
+### Dual parallel: App + SpringBoard (+ Photos side channel)
 
 | Channel | Session field | Lock | How to open |
 |---------|---------------|------|-------------|
 | App (TikTok) | `live` | `appLock` | `session_open` |
 | SpringBoard | `sbLive` | `sbLock` | `withSpringBoard:true` / `sb_ensure` / first `sb_*` |
+| Photos album | `photosLive` | `photosLock` | `photos_ensure` / `photos_import_file` |
 
-- **Held in parallel** — two Frida scripts on two processes.
+- **Held in parallel** — App + SB Frida scripts; Photos is a temporary third channel.
 - **RPCs concurrent** — separate locks; `dual_ping` / `Promise.all([app…, sb…])` run together.
-- **Not multi-app** — only one business app + SpringBoard.
+- **Not multi-app business** — one app + SpringBoard; Photos is import/clear only.
+- **photos_* never closes TikTok** — spawn Photos may briefly steal foreground.
+
+### Media import (PhotoKit, no fleetcontrol HTTP)
+
+Requires **Python 3** + **`pip install pymobiledevice3`** (AFC). Failures report `stage: upload|afc|attach|import|verify`.
+
+```bash
+# one-shot PC file → Photos Recents
+pnpm cli call photos_import_file --localPath D:\path\to\clip.mp4 --mediaType video
+pnpm cli call photos_list
+pnpm cli call photos_clear
+```
+
+| Tool | Role |
+|------|------|
+| `photos_import_file` | Upload + ensure Photos + PhotoKit import (+ sqlite verify) |
+| `media_upload` / `photos_ensure` / `photos_import` | Split steps for retry |
+| `photos_list` | Untrashed assets from Photos.sqlite via AFC |
+| `photos_clear` | Trash untrashed media (Recently Deleted), optional DCIM cleanup |
+
+AFC helper: `scripts/afc_tool.py` (push / list-untrashed / rm-dcim). Host process is always **Photos.app** (`com.apple.mobileslideshow`), never TikTok.
 
 ```text
 session_open { bundleId: TikTok, withSpringBoard: true }
@@ -96,7 +118,7 @@ pnpm cli close
 **Typing (real input path):** Feed → tap **search** → `wait` → `screen_snapshot({ search: "Search|Cancel|搜尋|搜索|取消" })` → `smart_type_text` on the **input box** ref (not a nav label).  
 Nav tabs / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`; do not retry those refs.
 
-**SB test alert:** `sb_alert_trigger` (no stack if open; `force:true` to stack) → `sb_alert_list` (`hasAlert`, not `alertCount` alone) → stacked: `sb_alert_dismiss({ all: true })` / single: `sb_alert_tap("Dismiss")`.
+**SB test alert:** `sb_alert_trigger` → `sb_alert_list` (`hasAlert`) → single `sb_alert_dismiss` (post-settle `cleared`) or stacked `sb_alert_dismiss({ all: true })`; if `needsRetry` re-list / retry `all`.
 
 **Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): only registered if `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
 

@@ -255,7 +255,9 @@ export function quietNetDump(
     },
     note:
       "rawCount=buffer before quiet filter; droppedDataUrls/foldedBinaryBodies/deduped=filter stats; returned(=count)=entries.length. " +
-      (dedupe ? "Default dedupe keeps first method+url. " : "") +
+      (dedupe
+        ? "Default dedupe keeps first method+url (set dedupe:false when debugging retries/replays). "
+        : "dedupe:false — all captures kept. ") +
       (redact
         ? "Default: secrets redacted, data: URLs dropped, binary bodies folded."
         : "redact=false: may contain secrets — never paste into issues/PRs."),

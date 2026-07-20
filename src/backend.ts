@@ -3,6 +3,13 @@
  */
 import { listApps, listDevices, listProcesses } from "./frida/device.js";
 import { mapError, PROBE_HELP } from "./errors.js";
+import {
+  mediaUpload,
+  photosChannel,
+  photosClear,
+  photosImportFile,
+  photosList,
+} from "./photos.js";
 import { sessionStore } from "./session.js";
 
 function textResult(text: string): { content: { type: "text"; text: string }[] } {
@@ -390,6 +397,83 @@ export async function handleMethod(
         const ms = Math.max(0, Number(params.ms ?? 1000));
         await new Promise((r) => setTimeout(r, ms));
         return textResult(`waited ${ms}ms`);
+      }
+      case "photos_ensure": {
+        const r = await photosChannel.ensure({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          settleMs: params.settleMs != null ? Number(params.settleMs) : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "photos_close": {
+        const r = await photosChannel.close({
+          kill: params.kill === false ? false : true,
+        });
+        return jsonResult(r);
+      }
+      case "media_upload": {
+        const localPath = String(params.localPath ?? "");
+        const mediaType = String(params.mediaType ?? "").toLowerCase();
+        if (!localPath) throw new Error("localPath is required");
+        if (mediaType !== "image" && mediaType !== "video") {
+          throw new Error('mediaType must be "image" or "video"');
+        }
+        const r = await mediaUpload({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          localPath,
+          mediaType,
+        });
+        return jsonResult(r);
+      }
+      case "photos_import": {
+        const mediaType = String(params.mediaType ?? "").toLowerCase();
+        if (mediaType !== "image" && mediaType !== "video") {
+          throw new Error('mediaType must be "image" or "video"');
+        }
+        let devicePath =
+          typeof params.devicePath === "string" ? params.devicePath : "";
+        if (!devicePath && typeof params.remotePath === "string") {
+          const rp = params.remotePath;
+          devicePath = rp.startsWith("/var/mobile/Media")
+            ? rp
+            : `/var/mobile/Media${rp.startsWith("/") ? "" : "/"}${rp}`;
+        }
+        if (!devicePath) throw new Error("devicePath or remotePath is required");
+        const r = await photosChannel.importDevicePath({
+          devicePath,
+          mediaType,
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          terminateAfter: params.terminateAfter === false ? false : true,
+        });
+        return jsonResult(r);
+      }
+      case "photos_import_file": {
+        const localPath = String(params.localPath ?? "");
+        const mediaType = String(params.mediaType ?? "").toLowerCase();
+        if (!localPath) throw new Error("localPath is required");
+        if (mediaType !== "image" && mediaType !== "video") {
+          throw new Error('mediaType must be "image" or "video"');
+        }
+        const r = await photosImportFile({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          localPath,
+          mediaType,
+          verify: params.verify === false ? false : true,
+        });
+        return jsonResult(r);
+      }
+      case "photos_list": {
+        const r = await photosList({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "photos_clear": {
+        const r = await photosClear({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          clearDcim: params.clearDcim === false ? false : true,
+        });
+        return jsonResult(r);
       }
       default:
         throw new Error(`Unknown method: ${method}`);

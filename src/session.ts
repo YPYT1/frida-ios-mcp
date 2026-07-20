@@ -25,6 +25,7 @@ import {
 } from "./snapshot.js";
 import { ProbeError } from "./errors.js";
 import { AsyncMutex } from "./mutex.js";
+import { photosChannel } from "./photos.js";
 
 export type SessionStatus = {
   open: boolean;
@@ -49,6 +50,9 @@ export type SessionStatus = {
   /** Dual-session model: app + SB held together; RPCs use separate locks */
   dualParallel?: boolean;
   springboardPid?: number;
+  /** Photos.app side channel (import/clear) — independent of app/SB */
+  photosAlive?: boolean;
+  photosPid?: number;
 };
 
 export type SnapshotRequest = SnapshotFormatOpts & {
@@ -88,6 +92,7 @@ class SessionStore {
     if (!this.live) {
       const sbAlive = !!this.sbLive?.alive;
       const intentionalKeep = sbAlive && this.sbKeepIntentional;
+      const ph = photosChannel.status();
       return {
         open: false,
         alive: false,
@@ -97,6 +102,8 @@ class SessionStore {
         springboardPid: this.sbLive?.alive ? this.sbLive.pid : undefined,
         springboardKept: intentionalKeep || undefined,
         dualParallel: true,
+        photosAlive: ph.photosAlive,
+        photosPid: ph.photosPid,
         hint: intentionalKeep
           ? "SpringBoard kept intentionally; call sb_close when done."
           : sbAlive
@@ -110,6 +117,7 @@ class SessionStore {
       };
     }
     const alive = this.live.alive;
+    const ph = photosChannel.status();
     return {
       open: true,
       alive,
@@ -128,6 +136,8 @@ class SessionStore {
       springboardAlive: !!this.sbLive?.alive,
       springboardPid: this.sbLive?.alive ? this.sbLive.pid : undefined,
       dualParallel: true,
+      photosAlive: ph.photosAlive,
+      photosPid: ph.photosPid,
       hint: !alive
         ? "Session script is dead. Call session_respawn or session_open."
         : isTikTokBundle(this.live.bundleId)
@@ -857,15 +867,17 @@ class SessionStore {
       { policy, all, maxRounds },
     ])) as Record<string, unknown>;
     const cleared = r.cleared === true;
+    const needsRetry = r.needsRetry === true || (!cleared && r.ok === true && all);
     return {
       ...r,
+      needsRetry,
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
       next: cleared
         ? "screen_snapshot (app session) after dismissing system alert"
-        : all
-          ? "Still remaining — sb_alert_list then sb_alert_dismiss({all:true}) or sb_alert_tap(title); do not parallel tap+dismiss"
-          : 'Layer may remain — sb_alert_dismiss({ all: true }) for stacks',
+        : needsRetry || all
+          ? "needsRetry — sb_alert_list then sb_alert_dismiss({all:true}) again or sb_alert_tap(title); do not parallel tap+dismiss"
+          : "Still present after settle — stacked? sb_alert_dismiss({ all: true }); or re-list",
     };
   }
 

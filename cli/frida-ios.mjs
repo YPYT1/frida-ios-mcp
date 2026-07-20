@@ -95,12 +95,16 @@ frida-ios CLI (same handleMethod as MCP; separate process session by default)
   swipe --direction up
   net-dump [--summaryOnly] [--redact false]
   sb-list | sb-ensure | sb-trigger | sb-close
+  photos tools via: call photos_import_file --localPath ... --mediaType video
 
 Examples:
   node cli/frida-ios.mjs open --bundleId com.ss.iphone.ugc.Ame --withSpringBoard
   node cli/frida-ios.mjs call wait --ms 4000
   node cli/frida-ios.mjs snap --limit 20 --search 個人
   node cli/frida-ios.mjs call net_dump --summaryOnly
+  node cli/frida-ios.mjs call photos_import_file --localPath D:\\clip.mp4 --mediaType video
+  node cli/frida-ios.mjs call photos_list
+  node cli/frida-ios.mjs call photos_clear
   node cli/frida-ios.mjs close
 
 ${SESSION_HINT}
@@ -108,6 +112,7 @@ ${SESSION_HINT}
 Notes:
   - net_dump: redact + drop data: URLs + fold binary by default.
   - App acts are serialized in-process; App+SB dual parallel is OK.
+  - photos_*: AFC needs Python + pymobiledevice3 (scripts/afc_tool.py).
   - Requires: pnpm build  (uses dist/backend.js)
 `.trim();
 

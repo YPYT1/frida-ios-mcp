@@ -97,6 +97,22 @@ function collectAlertObjects() {
     return out;
 }
 
+/** True if action view is still on-screen (chooseSync keeps dying mid-dismiss views). */
+function actionViewIsLive(v) {
+    try {
+        if (!v || v.handle.isNull()) return false;
+        if (typeof v.window === 'function') {
+            const w = v.window();
+            if (!w || w.handle.isNull()) return false;
+        }
+        if (typeof v.isHidden === 'function' && v.isHidden()) return false;
+        if (typeof v.alpha === 'function' && Number(v.alpha()) === 0) return false;
+        return true;
+    } catch (_e) {
+        return false;
+    }
+}
+
 function collectActionViews() {
     const out = [];
     const Cls = ObjC.classes._UIInterfaceActionCustomViewRepresentationView;
@@ -105,6 +121,7 @@ function collectActionViews() {
         const arr = ObjC.chooseSync(Cls);
         for (let i = 0; i < arr.length; i++) {
             const v = arr[i];
+            if (!actionViewIsLive(v)) continue;
             let title = '';
             try {
                 const action = v.action && v.action();
@@ -359,6 +376,15 @@ function remainingBrief(rem) {
     return brief;
 }
 
+/** UI settle after dismiss before re-list (actionViews lag mid-animation). */
+const DISMISS_SETTLE_MS = 350;
+/** Extra poll if still "present" after first settle (stale chooseSync). */
+const DISMISS_RECHECK_MS = 200;
+
+function remainingScore(rem) {
+    return (rem.alertCount || 0) + (rem.actionViewCount || 0);
+}
+
 /**
  * Dismiss system alert.
  * @param {string|{policy?:string,all?:boolean,maxRounds?:number}} opts
@@ -381,7 +407,7 @@ export function sbAlertDismiss(opts) {
         }
     }
 
-    // Single layer (default) — keep compatible; add cleared/remaining/rounds
+    // Single layer (default): dismiss → settle → re-list so cleared is not a false negative
     if (!all) {
         return new Promise(function (resolve) {
             ObjC.schedule(ObjC.mainQueue, function () {
@@ -394,6 +420,7 @@ export function sbAlertDismiss(opts) {
                             all: false,
                             rounds: 0,
                             cleared: true,
+                            needsRetry: false,
                             remaining: { alertCount: 0, actionViewCount: 0 },
                             via: 'none',
                             hint: 'no alert present',
@@ -401,21 +428,59 @@ export function sbAlertDismiss(opts) {
                         return;
                     }
                     const r = dismissOnceSync(pol);
-                    const rem = remainingSnapshot();
-                    resolve({
-                        ok: !!r.ok,
-                        policy: pol,
-                        all: false,
-                        rounds: 1,
-                        cleared: !rem.hasAlert,
-                        remaining: remainingBrief(rem),
-                        via: r.via || (r.ok ? 'unknown' : 'none'),
-                        matchedTitle: r.matchedTitle,
-                        error: r.error,
-                        hint: rem.hasAlert
-                            ? 'layer may remain — use sb_alert_dismiss({all:true}) for stacks; do not parallel tap+dismiss'
-                            : 'cleared; next: app screen_snapshot',
-                    });
+                    // actionViews often still list the same handle until animation settles
+                    function finishSingle(rem) {
+                        const cleared = !rem.hasAlert;
+                        resolve({
+                            ok: !!r.ok || cleared,
+                            policy: pol,
+                            all: false,
+                            rounds: 1,
+                            cleared,
+                            needsRetry: !cleared && !!r.ok,
+                            remaining: remainingBrief(rem),
+                            via: r.via || (r.ok ? 'unknown' : 'none'),
+                            matchedTitle: r.matchedTitle,
+                            error: r.error,
+                            settleMs: DISMISS_SETTLE_MS,
+                            hint: cleared
+                                ? 'cleared (post-settle); next: app screen_snapshot'
+                                : 'still present after settle — use sb_alert_dismiss({all:true}) for stacks; do not parallel tap+dismiss',
+                        });
+                    }
+                    setTimeout(function () {
+                        ObjC.schedule(ObjC.mainQueue, function () {
+                            try {
+                                const rem = remainingSnapshot();
+                                // One recheck if dismiss seemed to work but list still shows views
+                                if (rem.hasAlert && r.ok) {
+                                    setTimeout(function () {
+                                        ObjC.schedule(ObjC.mainQueue, function () {
+                                            try {
+                                                finishSingle(remainingSnapshot());
+                                            } catch (e3) {
+                                                resolve({
+                                                    ok: false,
+                                                    all: false,
+                                                    policy: pol,
+                                                    error: String(e3.message || e3),
+                                                });
+                                            }
+                                        });
+                                    }, DISMISS_RECHECK_MS);
+                                    return;
+                                }
+                                finishSingle(rem);
+                            } catch (e2) {
+                                resolve({
+                                    ok: false,
+                                    all: false,
+                                    policy: pol,
+                                    error: String(e2.message || e2),
+                                });
+                            }
+                        });
+                    }, DISMISS_SETTLE_MS);
                 } catch (e) {
                     resolve({ ok: false, all: false, policy: pol, error: String(e.message || e) });
                 }
@@ -423,9 +488,10 @@ export function sbAlertDismiss(opts) {
         });
     }
 
-    // all:true — loop on main queue with short settle delay between rounds
+    // all:true — settle between attempts; count a round only when remaining score drops
     return new Promise(function (resolve) {
         let rounds = 0;
+        let stallAttempts = 0;
         const vias = [];
 
         function finish(payload) {
@@ -443,8 +509,10 @@ export function sbAlertDismiss(opts) {
                             policy: pol,
                             rounds,
                             cleared: true,
+                            needsRetry: false,
                             remaining: { alertCount: 0, actionViewCount: 0 },
                             vias,
+                            settleMs: DISMISS_SETTLE_MS,
                             hint: 'all clear; next: app screen_snapshot',
                         });
                         return;
@@ -456,18 +524,63 @@ export function sbAlertDismiss(opts) {
                             policy: pol,
                             rounds,
                             cleared: false,
+                            needsRetry: true,
                             remaining: remainingBrief(rem),
                             vias,
+                            settleMs: DISMISS_SETTLE_MS,
                             hint:
-                                'maxRounds reached with remaining alerts — call sb_alert_dismiss({all:true}) again or sb_alert_tap(title)',
+                                'maxRounds reached with remaining — needsRetry: call sb_alert_dismiss({all:true}) again or sb_alert_tap(title)',
                         });
                         return;
                     }
+                    // Mid-animation stale handles: score may not drop every tap
+                    if (stallAttempts >= maxRounds * 2) {
+                        finish({
+                            ok: true,
+                            all: true,
+                            policy: pol,
+                            rounds,
+                            cleared: false,
+                            needsRetry: true,
+                            remaining: remainingBrief(rem),
+                            vias,
+                            settleMs: DISMISS_SETTLE_MS,
+                            hint:
+                                'stalled (remaining not dropping) — needsRetry: re-list then sb_alert_dismiss({all:true})',
+                        });
+                        return;
+                    }
+
+                    const scoreBefore = remainingScore(rem);
                     const r = dismissOnceSync(pol);
-                    rounds++;
                     if (r.via) vias.push(r.via);
-                    // Let UI settle before next list/dismiss
-                    setTimeout(tick, 300);
+
+                    setTimeout(function () {
+                        ObjC.schedule(ObjC.mainQueue, function () {
+                            try {
+                                const after = remainingSnapshot();
+                                const scoreAfter = remainingScore(after);
+                                if (scoreAfter < scoreBefore) {
+                                    rounds++;
+                                    stallAttempts = 0;
+                                } else {
+                                    stallAttempts++;
+                                }
+                                tick();
+                            } catch (e2) {
+                                finish({
+                                    ok: false,
+                                    all: true,
+                                    policy: pol,
+                                    rounds,
+                                    cleared: false,
+                                    needsRetry: true,
+                                    error: String(e2.message || e2),
+                                    vias,
+                                });
+                            }
+                        });
+                    }, DISMISS_SETTLE_MS);
                 } catch (e) {
                     finish({
                         ok: false,
@@ -475,6 +588,7 @@ export function sbAlertDismiss(opts) {
                         policy: pol,
                         rounds,
                         cleared: false,
+                        needsRetry: true,
                         error: String(e.message || e),
                         vias,
                     });
