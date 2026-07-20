@@ -108,6 +108,8 @@ class SessionStore {
   private orphanFridaOpPossible = false;
   /** Guards overlapping session_open before lock is even acquired. */
   private openInFlight = false;
+  /** True after a UI act until resnapshot replaces the ref table (status must not claim refsValid). */
+  private uiDirty = false;
   /** Last app pid we spawned/attached — for orphan kill after force unlock */
   private lastAppPid: number | null = null;
   private lastAppUdid: string | undefined;
@@ -148,7 +150,7 @@ class SessionStore {
     | "lastSnapshotGeneration"
     | "snapshotStale"
   > {
-    const refsValid = !!this.snapshot;
+    const refsValid = !!this.snapshot && !this.uiDirty;
     return {
       hasSnapshot: refsValid,
       refsValid,
@@ -156,7 +158,7 @@ class SessionStore {
       snapshotGeneration: this.snapshot?.generation,
       lastSnapshotGeneration:
         this.snapshot?.generation ?? this.lastSnapMeta?.generation,
-      snapshotStale: !this.snapshot && !!this.lastSnapMeta,
+      snapshotStale: (!this.snapshot || this.uiDirty) && !!this.lastSnapMeta,
     };
   }
 
@@ -291,22 +293,25 @@ class SessionStore {
 
   private appSessionBrief() {
     const s = this.status();
-    const hasLiveRefs = !!this.snapshot;
+    const refsValid = !!this.snapshot && !this.uiDirty;
+    const app = this.appLock.status();
+    let note: string | undefined;
+    if (this.uiDirty || (app.busy && app.busyOp === "app_op")) {
+      note = "app act / resnapshot in progress — wait for that tool to finish; do not use mid-flight refs";
+    } else if (!refsValid && this.lastSnapMeta) {
+      note = "refs cleared/stale — call screen_snapshot before tap(ref)";
+    }
     return {
       alive: !!s.alive,
       open: s.open,
       bundleId: s.bundleId,
-      /** Current in-memory ref table is valid for tap/type */
-      hasSnapshot: hasLiveRefs,
-      refsValid: hasLiveRefs,
-      /** Last completed snapshot gen (may be stale after act cleared refs) */
+      hasSnapshot: refsValid,
+      refsValid,
       lastSnapshotGeneration:
         this.snapshot?.generation ?? this.lastSnapMeta?.generation,
-      snapshotStale: !this.snapshot && !!this.lastSnapMeta,
+      snapshotStale: (!this.snapshot || this.uiDirty) && !!this.lastSnapMeta,
       snapshotGeneration: s.snapshotGeneration,
-      note: !hasLiveRefs && this.lastSnapMeta
-        ? "refs cleared/stale — call screen_snapshot before tap(ref)"
-        : undefined,
+      note,
     };
   }
 
@@ -318,6 +323,7 @@ class SessionStore {
     this.prevSnapshot = null;
     this.lastTreeText = null;
     this.lastSnapMeta = null;
+    this.uiDirty = false;
     const r = await closeLiveSession(live);
     if (r.timedOut) this.orphanFridaOpPossible = true;
     return { closeTimedOut: r.timedOut };
@@ -337,11 +343,20 @@ class SessionStore {
     resnapshot: boolean | undefined,
     settleMs = 450,
   ): Promise<string | undefined> {
-    if (resnapshot === false) return undefined;
-    await new Promise((r) => setTimeout(r, settleMs));
-    // Caller must already hold appLock (re-entrant screenSnapshotBody)
-    const { text } = await this.screenSnapshotBody({ ...SessionStore.DEFAULT_SNAP });
-    return text;
+    if (resnapshot === false) {
+      this.snapshot = null;
+      this.uiDirty = false;
+      return undefined;
+    }
+    this.uiDirty = true;
+    try {
+      await new Promise((r) => setTimeout(r, settleMs));
+      // Caller must already hold appLock (re-entrant screenSnapshotBody)
+      const { text } = await this.screenSnapshotBody({ ...SessionStore.DEFAULT_SNAP });
+      return text;
+    } finally {
+      this.uiDirty = false;
+    }
   }
 
   private actEnvelope(
@@ -445,16 +460,29 @@ class SessionStore {
               `previous app session close timed out after ${closeTimeoutMs()}ms — continued open (orphanFridaOpPossible).`,
             );
           }
-          const sbClose = await this.detachSbSessionUnlocked();
+          // Must hold sbLock so in-flight sb_alert_* finish (or time out) before we tear SB down
+          const sbClose = await this.sbLock.run(
+            async () => this.detachSbSessionUnlocked(),
+            {
+              waitTimeoutMs: lockWaitTimeoutMs(),
+              holdTimeoutMs: closeTimeoutMs() + 2_000,
+              op: "session_open_sb_teardown",
+            },
+          );
           if (sbClose.closeTimedOut) {
             warnings.push(
               `previous SpringBoard close timed out after ${closeTimeoutMs()}ms — continued.`,
             );
           }
 
-          // Attach SB in parallel with spawn (separate sbLock)
+          // Attach SB in parallel with spawn (separate sbLock).
+          // Call unlocked path under sbLock — do not use ensureSpringBoard() (blocked by openInFlight).
           if (wantSb) {
-            sbPromise = this.ensureSpringBoard(opts.udid)
+            sbPromise = this.sbLock
+              .run(() => this.ensureSpringBoardUnlocked(opts.udid), {
+                waitTimeoutMs: lockWaitTimeoutMs(),
+                op: "session_open_sb_attach",
+              })
               .then((sb) => ({
                 ok: true as const,
                 pid: sb.pid,
@@ -760,9 +788,16 @@ class SessionStore {
         })),
       this.sbLock
         .run(async () => {
+          if (this.openInFlight) {
+            throw new ProbeError(
+              "SESSION_OPEN_IN_FLIGHT",
+              "session_open in progress — SpringBoard ping deferred.",
+              ["wait for session_open", "or session_force_unlock"],
+            );
+          }
           const live = await this.ensureSpringBoardUnlocked();
           return String(await callRpc(live.script, "ping"));
-        })
+        }, { waitTimeoutMs: lockWaitTimeoutMs(), op: "dual_ping_sb" })
         .then((pong) => ({ ok: true as const, pong, channel: "springboard" as const }))
         .catch((e: unknown) => ({
           ok: false as const,
@@ -770,13 +805,18 @@ class SessionStore {
           error: e instanceof Error ? e.message : String(e),
         })),
     ]);
+    // Brief under appLock so we don't race a parallel tap/swipe mid-resnapshot
+    const appSession = await this.withAppOp(
+      async () => this.appSessionBrief(),
+      "dual_ping_status",
+    );
     return {
       ok: app.ok && sb.ok,
       parallel: true,
       elapsedMs: Date.now() - started,
       app,
       springboard: sb,
-      appSession: this.appSessionBrief(),
+      appSession,
       springboardAlive: !!this.sbLive?.alive,
       springboardPid: this.sbLive?.pid,
       note: "App and SpringBoard RPCs ran under separate locks (true parallel).",
@@ -990,6 +1030,7 @@ class SessionStore {
     // Prefer live snapshot; if act cleared it, fall back to last complete table
     const previous = this.snapshot ?? this.prevSnapshot;
     this.snapshot = table;
+    this.uiDirty = false;
     const text = formatSnapshot(table, {
       onScreenOnly: opts.onScreenOnly,
       limit: opts.limit,
@@ -1085,7 +1126,6 @@ class SessionStore {
     return this.withAppOp(async () => {
       const { x, y } = this.resolveTapPoint(opts);
       const result = await this.rpc("tap", [x, y]);
-      this.snapshot = null;
       const snapshot = await this.maybeResnapshot(opts.resnapshot);
       return this.actEnvelope(result, snapshot, { action: "tap", at: { x, y } });
     });
@@ -1102,7 +1142,6 @@ class SessionStore {
       const { x, y } = this.resolveTapPoint(opts);
       const gapMs = opts.gapMs ?? 140;
       const result = await this.rpc("doubleTap", [x, y, gapMs]);
-      this.snapshot = null;
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
       return this.actEnvelope(result, snapshot, { action: "double_tap", at: { x, y } });
     });
@@ -1161,6 +1200,13 @@ class SessionStore {
   }
 
   private async ensureSpringBoard(udid?: string): Promise<LiveSession> {
+    if (this.openInFlight) {
+      throw new ProbeError(
+        "SESSION_OPEN_IN_FLIGHT",
+        "session_open is in progress — wait before sb_ensure / sb_* (open tears down and re-attaches SpringBoard).",
+        ["wait for session_open to return", "session_force_unlock if stuck"],
+      );
+    }
     return this.sbLock.run(() => this.ensureSpringBoardUnlocked(udid), {
       waitTimeoutMs: lockWaitTimeoutMs(),
       op: "sb_ensure",
@@ -1168,6 +1214,17 @@ class SessionStore {
   }
 
   private async sbRpc(name: string, args: unknown[] = []): Promise<unknown> {
+    if (this.openInFlight) {
+      throw new ProbeError(
+        "SESSION_OPEN_IN_FLIGHT",
+        `session_open is in progress — sb_${name} blocked until open finishes (avoids SCRIPT_DESTROYED on SpringBoard teardown).`,
+        [
+          "wait for session_open",
+          "then sb_alert_list / sb_alert_dismiss",
+          "or session_force_unlock if open is stuck",
+        ],
+      );
+    }
     return this.sbLock.run(
       async () => {
         const sb = await this.ensureSpringBoardUnlocked();
@@ -1180,7 +1237,11 @@ class SessionStore {
           const msg = e instanceof Error ? e.message : String(e);
           if (/script is destroyed|detached/i.test(msg)) {
             this.sbLive = null;
-            throw new Error(`${msg}. SpringBoard session lost — retry sb_alert_list.`);
+            throw new ProbeError(
+              "SCRIPT_DESTROYED",
+              `${msg}. SpringBoard session lost — retry sb_alert_list (do not parallel sb_* with session_open).`,
+              ["sb_ensure", "sb_alert_list", "or wait for session_open then retry"],
+            );
           }
           throw e;
         }
@@ -1300,7 +1361,6 @@ class SessionStore {
   }): Promise<Record<string, unknown>> {
     return this.withAppOp(async () => {
       const dur = opts.duration ?? 0.4;
-      this.snapshot = null;
       let result: unknown;
       if (
         opts.x0 != null &&
@@ -1370,7 +1430,6 @@ class SessionStore {
         throw e;
       }
       await this.humanPause(150, 400);
-      this.snapshot = null;
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
       return {
         ...this.actEnvelope(frida, snapshot, {
@@ -1489,7 +1548,7 @@ class SessionStore {
 
     const tapTarget = async () => {
       await this.rpc("tap", [tapX, tapY]);
-      this.snapshot = null;
+      this.uiDirty = true;
       return { x: tapX, y: tapY, ...tapMeta };
     };
 
