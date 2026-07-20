@@ -259,7 +259,16 @@ export async function handleMethod(
       case "sb_alert_dismiss": {
         const policy =
           typeof params.policy === "string" ? params.policy : undefined;
-        const r = await sessionStore.sbAlertDismiss(policy);
+        const all = params.all === true;
+        const maxRounds =
+          params.maxRounds != null ? Number(params.maxRounds) : undefined;
+        const r = await sessionStore.sbAlertDismiss({
+          policy,
+          all,
+          maxRounds: Number.isFinite(maxRounds as number)
+            ? (maxRounds as number)
+            : undefined,
+        });
         return jsonResult(r);
       }
       case "sb_close": {
@@ -373,6 +382,7 @@ export async function handleMethod(
           summaryOnly: Boolean(params.summaryOnly),
           includeDataUrls: Boolean(params.includeDataUrls),
           includeBinaryBodies: Boolean(params.includeBinaryBodies),
+          dedupe: params.dedupe === false ? false : true,
         });
         return jsonResult(r);
       }

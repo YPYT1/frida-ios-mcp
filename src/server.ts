@@ -306,7 +306,10 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "sb_alert_list",
-    "List SpringBoard system alerts (separate SB attach). Returns appSession. After dismiss → app screen_snapshot.",
+    [
+      "List SpringBoard alerts. hasAlert = actionViewCount>0 || alertCount>0 (test alerts often only actionViews).",
+      "Do not judge by alertCount alone. After dismiss → app screen_snapshot.",
+    ].join(" "),
     {},
     async () => toolResult(await run("sb_alert_list")),
   );
@@ -315,7 +318,7 @@ export function createMcpServer(): McpServer {
     "sb_alert_trigger",
     [
       "Create a test system alert (SBAlertItemTestRecipe). Default force=false: skip if alert already present (no stack).",
-      "force:true stacks another. Next: sb_alert_list → sb_alert_tap(\"Dismiss\").",
+      "force:true stacks another. Next: sb_alert_list → sb_alert_dismiss({all:true}) or sb_alert_tap.",
     ].join(" "),
     {
       force: z
@@ -328,18 +331,31 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "sb_alert_tap",
-    "Tap SpringBoard alert button by title. Then call app screen_snapshot.",
+    "Tap SpringBoard alert button by title. Then call app screen_snapshot. Do not parallel with dismiss.",
     { title: z.string().describe("Button title to match") },
     async ({ title }) => toolResult(await run("sb_alert_tap", { title })),
   );
 
   server.tool(
     "sb_alert_dismiss",
-    "Dismiss SB alert. Default policy=deny (cancel/not-allow; location-safe). Then app screen_snapshot.",
+    [
+      "Dismiss SB alert. Default policy=deny (location-safe). Default all=false: one layer.",
+      "Stacked Dismiss layers: all=true (loops until clear or maxRounds, default 5). Returns cleared/remaining/rounds.",
+      "Do not parallel sb_alert_tap + dismiss. Then app screen_snapshot.",
+    ].join(" "),
     {
       policy: z.enum(["deny", "default", "first"]).optional().describe("Default deny"),
+      all: z
+        .boolean()
+        .optional()
+        .describe("Default false. true = clear all stacked alerts (idempotent)"),
+      maxRounds: z
+        .number()
+        .optional()
+        .describe("Only with all=true; default 5"),
     },
-    async ({ policy }) => toolResult(await run("sb_alert_dismiss", { policy })),
+    async ({ policy, all, maxRounds }) =>
+      toolResult(await run("sb_alert_dismiss", { policy, all, maxRounds })),
   );
 
   server.tool(
@@ -471,8 +487,8 @@ export function createMcpServer(): McpServer {
   server.tool(
     "net_dump",
     [
-      "Quiet HTTP dump. rawCount=buffer size; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies=stats.",
-      "Default: redact secrets, DROP data: URLs, FOLD binary bodies. summaryOnly=host counts.",
+      "Quiet HTTP dump. rawCount=buffer; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies/deduped=stats.",
+      "Default: redact, DROP data: URLs, FOLD binary, dedupe method+url (keep first). summaryOnly=host counts.",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),
@@ -490,6 +506,10 @@ export function createMcpServer(): McpServer {
         .boolean()
         .optional()
         .describe("Default false — fold octet-stream / binary previews"),
+      dedupe: z
+        .boolean()
+        .optional()
+        .describe("Default true — keep first entry per method+url"),
     },
     async (args) => toolResult(await run("net_dump", args)),
   );

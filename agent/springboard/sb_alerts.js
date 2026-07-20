@@ -121,12 +121,28 @@ function collectActionViews() {
     return out;
 }
 
+function remainingSnapshot() {
+    const alerts = collectAlertObjects();
+    const actions = collectActionViews();
+    return {
+        alertCount: alerts.length,
+        actionViewCount: actions.length,
+        hasAlert: alerts.length > 0 || actions.length > 0,
+        alerts,
+        actionViews: actions,
+    };
+}
+
+const LIST_NOTE =
+    'alerts=SBUserNotificationAlert instances; actionViews=tappable buttons (test alerts often ONLY actionViews). ' +
+    'Visible if hasAlert (actionViewCount>0 || alertCount>0) — do NOT judge by alertCount alone. ' +
+    'Location: prefer deny/cancel via sb_alert_dismiss or sb_alert_tap. Stacked: sb_alert_dismiss({all:true}).';
+
 export function sbAlertList() {
     return new Promise(function (resolve) {
         ObjC.schedule(ObjC.mainQueue, function () {
             try {
-                const alerts = collectAlertObjects();
-                const actions = collectActionViews();
+                const rem = remainingSnapshot();
                 let keyWindow = null;
                 try {
                     const app = ObjC.classes.UIApplication.sharedApplication();
@@ -136,12 +152,12 @@ export function sbAlertList() {
                 resolve({
                     ok: true,
                     keyWindow,
-                    alertCount: alerts.length,
-                    actionViewCount: actions.length,
-                    alerts,
-                    actionViews: actions,
-                    note:
-                        'Location-related alerts should use deny/cancel. Prefer sb_alert_tap title match or sb_alert_dismiss.',
+                    alertCount: rem.alertCount,
+                    actionViewCount: rem.actionViewCount,
+                    hasAlert: rem.hasAlert,
+                    alerts: rem.alerts,
+                    actionViews: rem.actionViews,
+                    note: LIST_NOTE,
                 });
             } catch (e) {
                 resolve({ ok: false, error: String(e.message || e) });
@@ -272,82 +288,200 @@ export function sbAlertTrigger(force) {
     });
 }
 
-export function sbAlertDismiss(policy) {
-    // policy: 'deny' | 'default' | 'first'
-    const pol = policy || 'deny';
-    return new Promise(function (resolve) {
-        ObjC.schedule(ObjC.mainQueue, function () {
+/**
+ * One dismiss attempt (must run on main queue). policy: 'deny' | 'default' | 'first'
+ * @returns {{ ok: boolean, via?: string, error?: string, matchedTitle?: string }}
+ */
+function dismissOnceSync(pol) {
+    const alerts = collectAlertObjects();
+    const actions = collectActionViews();
+
+    // Prefer matching interface action titles
+    if (pol === 'deny' && alerts.length > 0) {
+        let denyTitle = null;
+        const AlertCls = ObjC.classes.SBUserNotificationAlert;
+        const objs = AlertCls ? ObjC.chooseSync(AlertCls) : [];
+        if (objs.length > 0) denyTitle = pickDenyTitle(objs[0]);
+        if (denyTitle) {
+            const r = invokeActionByTitle(denyTitle);
+            if (r.ok) return Object.assign({ via: 'deny-title' }, r);
+        }
+    }
+
+    // Fall back: first action view (test alerts often only have actionViews)
+    if (actions.length > 0 && actions[0].title) {
+        const r = invokeActionByTitle(actions[0].title);
+        if (r.ok) return Object.assign({ via: 'first-action' }, r);
+    }
+
+    // Fall back: dismiss/deactivate/cancel on alert object
+    const AlertCls = ObjC.classes.SBUserNotificationAlert;
+    if (AlertCls) {
+        const objs = ObjC.chooseSync(AlertCls);
+        if (objs.length > 0) {
+            const a = objs[0];
             try {
-                const alerts = collectAlertObjects();
-                const actions = collectActionViews();
-
-                // Prefer matching interface action titles
-                if (pol === 'deny' && alerts.length > 0) {
-                    const a = alerts[0];
-                    let denyTitle = null;
-                    if (a.locationRelated || true) {
-                        // Always prefer deny-like when policy=deny
-                        const AlertCls = ObjC.classes.SBUserNotificationAlert;
-                        const objs = AlertCls ? ObjC.chooseSync(AlertCls) : [];
-                        if (objs.length > 0) denyTitle = pickDenyTitle(objs[0]);
-                    }
-                    if (denyTitle) {
-                        const r = invokeActionByTitle(denyTitle);
-                        if (r.ok) {
-                            resolve(Object.assign({ policy: pol, via: 'deny-title' }, r));
-                            return;
-                        }
-                    }
+                if (typeof a.dismiss === 'function') {
+                    a.dismiss();
+                    return { ok: true, via: 'dismiss' };
                 }
+            } catch (_e) { /* */ }
+            try {
+                if (typeof a.deactivate === 'function') {
+                    a.deactivate();
+                    return { ok: true, via: 'deactivate' };
+                }
+            } catch (_e) { /* */ }
+            try {
+                if (typeof a.cancel === 'function') {
+                    a.cancel();
+                    return { ok: true, via: 'cancel' };
+                }
+            } catch (_e) { /* */ }
+        }
+    }
 
-                // Fall back: first action view
-                if (actions.length > 0 && actions[0].title) {
-                    const r = invokeActionByTitle(actions[0].title);
-                    if (r.ok) {
-                        resolve(Object.assign({ policy: pol, via: 'first-action' }, r));
+    return {
+        ok: false,
+        error: 'no alert/action to dismiss',
+        via: 'none',
+    };
+}
+
+function remainingBrief(rem) {
+    const brief = {
+        alertCount: rem.alertCount,
+        actionViewCount: rem.actionViewCount,
+    };
+    if (rem.hasAlert && rem.actionViews && rem.actionViews.length) {
+        brief.actionViews = rem.actionViews;
+    }
+    return brief;
+}
+
+/**
+ * Dismiss system alert.
+ * @param {string|{policy?:string,all?:boolean,maxRounds?:number}} opts
+ *   - policy: 'deny'|'default'|'first' (default deny)
+ *   - all: if true, loop until clear or maxRounds (default false = one layer)
+ *   - maxRounds: only with all (default 5)
+ */
+export function sbAlertDismiss(opts) {
+    let pol = 'deny';
+    let all = false;
+    let maxRounds = 5;
+    if (typeof opts === 'string' || opts == null) {
+        pol = opts || 'deny';
+    } else if (typeof opts === 'object') {
+        pol = opts.policy || 'deny';
+        all = !!opts.all;
+        if (opts.maxRounds != null) {
+            const n = Number(opts.maxRounds);
+            maxRounds = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 5;
+        }
+    }
+
+    // Single layer (default) — keep compatible; add cleared/remaining/rounds
+    if (!all) {
+        return new Promise(function (resolve) {
+            ObjC.schedule(ObjC.mainQueue, function () {
+                try {
+                    const before = remainingSnapshot();
+                    if (!before.hasAlert) {
+                        resolve({
+                            ok: true,
+                            policy: pol,
+                            all: false,
+                            rounds: 0,
+                            cleared: true,
+                            remaining: { alertCount: 0, actionViewCount: 0 },
+                            via: 'none',
+                            hint: 'no alert present',
+                        });
                         return;
                     }
+                    const r = dismissOnceSync(pol);
+                    const rem = remainingSnapshot();
+                    resolve({
+                        ok: !!r.ok,
+                        policy: pol,
+                        all: false,
+                        rounds: 1,
+                        cleared: !rem.hasAlert,
+                        remaining: remainingBrief(rem),
+                        via: r.via || (r.ok ? 'unknown' : 'none'),
+                        matchedTitle: r.matchedTitle,
+                        error: r.error,
+                        hint: rem.hasAlert
+                            ? 'layer may remain — use sb_alert_dismiss({all:true}) for stacks; do not parallel tap+dismiss'
+                            : 'cleared; next: app screen_snapshot',
+                    });
+                } catch (e) {
+                    resolve({ ok: false, all: false, policy: pol, error: String(e.message || e) });
                 }
-
-                // Fall back: dismiss/deactivate/cancel on alert object
-                const AlertCls = ObjC.classes.SBUserNotificationAlert;
-                if (AlertCls) {
-                    const objs = ObjC.chooseSync(AlertCls);
-                    if (objs.length > 0) {
-                        const a = objs[0];
-                        try {
-                            if (typeof a.dismiss === 'function') {
-                                a.dismiss();
-                                resolve({ ok: true, policy: pol, via: 'dismiss' });
-                                return;
-                            }
-                        } catch (_e) { /* */ }
-                        try {
-                            if (typeof a.deactivate === 'function') {
-                                a.deactivate();
-                                resolve({ ok: true, policy: pol, via: 'deactivate' });
-                                return;
-                            }
-                        } catch (_e) { /* */ }
-                        try {
-                            if (typeof a.cancel === 'function') {
-                                a.cancel();
-                                resolve({ ok: true, policy: pol, via: 'cancel' });
-                                return;
-                            }
-                        } catch (_e) { /* */ }
-                    }
-                }
-
-                resolve({
-                    ok: false,
-                    error: 'no alert/action to dismiss',
-                    alertCount: alerts.length,
-                    actionViewCount: actions.length,
-                });
-            } catch (e) {
-                resolve({ ok: false, error: String(e.message || e) });
-            }
+            });
         });
+    }
+
+    // all:true — loop on main queue with short settle delay between rounds
+    return new Promise(function (resolve) {
+        let rounds = 0;
+        const vias = [];
+
+        function finish(payload) {
+            resolve(payload);
+        }
+
+        function tick() {
+            ObjC.schedule(ObjC.mainQueue, function () {
+                try {
+                    const rem = remainingSnapshot();
+                    if (!rem.hasAlert) {
+                        finish({
+                            ok: true,
+                            all: true,
+                            policy: pol,
+                            rounds,
+                            cleared: true,
+                            remaining: { alertCount: 0, actionViewCount: 0 },
+                            vias,
+                            hint: 'all clear; next: app screen_snapshot',
+                        });
+                        return;
+                    }
+                    if (rounds >= maxRounds) {
+                        finish({
+                            ok: true,
+                            all: true,
+                            policy: pol,
+                            rounds,
+                            cleared: false,
+                            remaining: remainingBrief(rem),
+                            vias,
+                            hint:
+                                'maxRounds reached with remaining alerts — call sb_alert_dismiss({all:true}) again or sb_alert_tap(title)',
+                        });
+                        return;
+                    }
+                    const r = dismissOnceSync(pol);
+                    rounds++;
+                    if (r.via) vias.push(r.via);
+                    // Let UI settle before next list/dismiss
+                    setTimeout(tick, 300);
+                } catch (e) {
+                    finish({
+                        ok: false,
+                        all: true,
+                        policy: pol,
+                        rounds,
+                        cleared: false,
+                        error: String(e.message || e),
+                        vias,
+                    });
+                }
+            });
+        }
+
+        tick();
     });
 }

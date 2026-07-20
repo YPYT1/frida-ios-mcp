@@ -16,6 +16,11 @@ export type NetQuietOpts = {
   includeDataUrls?: boolean;
   /** Include binary / octet-stream body previews. Default false. */
   includeBinaryBodies?: boolean;
+  /**
+   * Dedupe by method+url (keep first). Default true — reduces
+   * completionHandler + no-handler double captures for the same request.
+   */
+  dedupe?: boolean;
 };
 
 function redactValue(v: string): string {
@@ -187,11 +192,14 @@ export function quietNetDump(
   opts: NetQuietOpts = {},
 ): Record<string, unknown> {
   const redact = opts.redact !== false;
+  const dedupe = opts.dedupe !== false;
   const rawEntries = Array.isArray(dump.entries)
     ? (dump.entries as Record<string, unknown>[])
     : [];
   let droppedDataUrls = 0;
   let foldedBinary = 0;
+  let deduped = 0;
+  const seen = new Set<string>();
   const entries: Record<string, unknown>[] = [];
   for (const e of rawEntries) {
     const url = typeof e.url === "string" ? e.url : "";
@@ -211,6 +219,16 @@ export function quietNetDump(
     ) {
       foldedBinary++;
     }
+    if (dedupe) {
+      const method = String(q.method ?? e.method ?? "").toUpperCase();
+      const u = String(q.url ?? url);
+      const key = `${method} ${u}`;
+      if (seen.has(key)) {
+        deduped++;
+        continue;
+      }
+      seen.add(key);
+    }
     entries.push(q);
   }
   const returned = entries.length;
@@ -221,20 +239,23 @@ export function quietNetDump(
     entries,
     /** Capture buffer size before quiet filters (agent ring / pre-filter list) */
     rawCount: rawEntries.length,
-    /** entries.length after drop/fold — same as returned */
+    /** entries.length after drop/fold/dedupe — same as returned */
     returned,
     /** Alias of returned (kept for old clients; always === returned) */
     count: returned,
     droppedDataUrls,
     foldedBinaryBodies: foldedBinary,
+    deduped,
     redacted: redact,
     quietDefaults: {
       includeDataUrls: opts.includeDataUrls === true,
       includeBinaryBodies: opts.includeBinaryBodies === true,
+      dedupe,
       redact,
     },
     note:
-      "rawCount=buffer before quiet filter; droppedDataUrls/foldedBinaryBodies=filter stats; returned(=count)=entries.length. " +
+      "rawCount=buffer before quiet filter; droppedDataUrls/foldedBinaryBodies/deduped=filter stats; returned(=count)=entries.length. " +
+      (dedupe ? "Default dedupe keeps first method+url. " : "") +
       (redact
         ? "Default: secrets redacted, data: URLs dropped, binary bodies folded."
         : "redact=false: may contain secrets — never paste into issues/PRs."),

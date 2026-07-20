@@ -70,7 +70,8 @@ rpc.exports = {
     // --- SpringBoard 系统弹窗（注入 SpringBoard 时用）---
     sbAlertList:    ()                   => sbAlertList(),
     sbAlertTap:     (title)              => sbAlertTap(title),
-    sbAlertDismiss: (policy)             => sbAlertDismiss(policy),
+    // opts: string policy (legacy) | { policy?, all?, maxRounds? }
+    sbAlertDismiss: (opts)               => sbAlertDismiss(opts == null ? {} : opts),
     sbAlertTrigger: (force)              => sbAlertTrigger(!!force),
 };
 

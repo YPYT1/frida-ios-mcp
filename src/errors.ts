@@ -167,7 +167,7 @@ export const PROBE_HELP = {
     type: "smart_type_text when field needs focus; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
     system_alert:
-      "sb_alert_trigger (force default false — skips if alert already present) → sb_alert_list → sb_alert_tap/dismiss → screen_snapshot",
+      "sb_alert_trigger (force default false — no stack) → sb_alert_list (hasAlert, not alertCount alone) → stacked: sb_alert_dismiss({all:true}) | single: sb_alert_tap/dismiss → app screen_snapshot; never parallel tap+dismiss",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
   },
   typing: {

@@ -808,12 +808,24 @@ class SessionStore {
 
   async sbAlertList(): Promise<unknown> {
     const r = (await this.sbRpc("sbAlertList")) as Record<string, unknown>;
+    const alertCount = Number(r.alertCount ?? 0);
+    const actionViewCount = Number(r.actionViewCount ?? 0);
+    const hasAlert =
+      typeof r.hasAlert === "boolean"
+        ? r.hasAlert
+        : alertCount > 0 || actionViewCount > 0;
     return {
       ...r,
+      hasAlert,
+      note:
+        typeof r.note === "string"
+          ? r.note
+          : "alerts=SBUserNotificationAlert; actionViews=buttons (test alerts often only actionViews). hasAlert = actionViewCount>0 || alertCount>0.",
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
-      next:
-        "After sb_alert_tap/dismiss, call screen_snapshot on the APP session (not sb).",
+      next: hasAlert
+        ? 'sb_alert_tap(title) or sb_alert_dismiss({ all: true }) if stacked; then app screen_snapshot'
+        : "No SB alert — continue with app screen_snapshot",
     };
   }
 
@@ -827,15 +839,33 @@ class SessionStore {
     };
   }
 
-  async sbAlertDismiss(policy?: string): Promise<unknown> {
-    const r = (await this.sbRpc("sbAlertDismiss", [policy ?? "deny"])) as Record<
-      string,
-      unknown
-    >;
+  async sbAlertDismiss(
+    opts: { policy?: string; all?: boolean; maxRounds?: number } | string = {},
+  ): Promise<unknown> {
+    // Back-compat: sbAlertDismiss("deny")
+    const o =
+      typeof opts === "string"
+        ? { policy: opts, all: false as boolean | undefined, maxRounds: undefined as number | undefined }
+        : opts ?? {};
+    const policy = o.policy ?? "deny";
+    const all = o.all === true;
+    const maxRounds =
+      o.maxRounds != null && Number.isFinite(Number(o.maxRounds))
+        ? Math.max(1, Math.floor(Number(o.maxRounds)))
+        : 5;
+    const r = (await this.sbRpc("sbAlertDismiss", [
+      { policy, all, maxRounds },
+    ])) as Record<string, unknown>;
+    const cleared = r.cleared === true;
     return {
       ...r,
       appSession: this.appSessionBrief(),
-      next: "screen_snapshot (app session) after dismissing system alert",
+      springboardAlive: !!this.sbLive?.alive,
+      next: cleared
+        ? "screen_snapshot (app session) after dismissing system alert"
+        : all
+          ? "Still remaining — sb_alert_list then sb_alert_dismiss({all:true}) or sb_alert_tap(title); do not parallel tap+dismiss"
+          : 'Layer may remain — sb_alert_dismiss({ all: true }) for stacks',
     };
   }
 
@@ -848,9 +878,9 @@ class SessionStore {
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
       next: r.skipped
-        ? 'Alert already present — sb_alert_tap("Dismiss") or sb_alert_dismiss; force:true to stack another'
+        ? 'Alert already present — sb_alert_dismiss({all:true}) or sb_alert_tap; force:true to stack another'
         : r.ok
-          ? 'sb_alert_list → sb_alert_tap("Dismiss" or listed title)'
+          ? 'sb_alert_list → sb_alert_dismiss({all:true}) or sb_alert_tap("Dismiss")'
           : "Check SpringBoard attach (sb_ensure) and iOS version support",
     };
   }
@@ -1284,6 +1314,8 @@ class SessionStore {
       includeDataUrls?: boolean;
       /** Include binary/octet-stream body previews. Default false. */
       includeBinaryBodies?: boolean;
+      /** Dedupe method+url (keep first). Default true. */
+      dedupe?: boolean;
     } = {},
   ): Promise<unknown> {
     const { quietNetDump, summarizeNetHosts } = await import("./redact.js");
@@ -1295,6 +1327,7 @@ class SessionStore {
       redact,
       includeDataUrls: options.includeDataUrls === true,
       includeBinaryBodies: options.includeBinaryBodies === true,
+      dedupe: options.dedupe !== false,
     };
     if (options.summaryOnly) {
       const entries = Array.isArray(raw.entries) ? raw.entries : [];

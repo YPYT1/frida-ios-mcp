@@ -30,6 +30,13 @@ const noisy = {
       },
       body: { encoding: "base64", length: 2024, preview: "\x00\x01\x02binaryjunk" },
     },
+    // duplicate method+url (AppsFlyer-style double capture)
+    {
+      method: "POST",
+      url: "https://api.snapkit.com/v1",
+      headers: { "Content-Type": "application/json" },
+      body: { encoding: "utf8", preview: '{"dup":true}' },
+    },
     {
       method: "GET",
       url: "https://www.tiktok.com/api/foo",
@@ -37,7 +44,7 @@ const noisy = {
       body: { encoding: "utf8", preview: '{"ok":true}' },
     },
   ],
-  count: 3,
+  count: 4,
 };
 const q = quietNetDump(noisy, {});
 console.log("quiet fields", {
@@ -46,10 +53,17 @@ console.log("quiet fields", {
   count: q.count,
   droppedDataUrls: q.droppedDataUrls,
   foldedBinaryBodies: q.foldedBinaryBodies,
+  deduped: q.deduped,
   note: q.note,
 });
-if (q.rawCount !== 3 || q.returned !== 2 || q.count !== q.returned || q.droppedDataUrls < 1) {
-  throw new Error("quietNetDump field semantics failed");
+if (
+  q.rawCount !== 4 ||
+  q.returned !== 2 ||
+  q.count !== q.returned ||
+  q.droppedDataUrls < 1 ||
+  q.deduped < 1
+) {
+  throw new Error("quietNetDump field semantics / dedupe failed");
 }
 console.log(JSON.stringify(q.entries, null, 2).slice(0, 700));
 

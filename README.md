@@ -96,7 +96,7 @@ pnpm cli close
 **Typing (real input path):** Feed → tap **search** → `wait` → `screen_snapshot({ search: "Search|Cancel|搜尋|搜索|取消" })` → `smart_type_text` on the **input box** ref (not a nav label).  
 Nav tabs / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`; do not retry those refs.
 
-**SB test alert:** `sb_alert_trigger` (no stack if one already open; `force:true` to stack) → `sb_alert_list` → `sb_alert_tap("Dismiss")`.
+**SB test alert:** `sb_alert_trigger` (no stack if open; `force:true` to stack) → `sb_alert_list` (`hasAlert`, not `alertCount` alone) → stacked: `sb_alert_dismiss({ all: true })` / single: `sb_alert_tap("Dismiss")`.
 
 **Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): only registered if `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
 
