@@ -68,13 +68,33 @@ def _import_afc():
     except ImportError as e:
         fail(
             "afc",
-            f"pymobiledevice3 not installed: {e}",
+            f"pymobiledevice3 not installed in {sys.executable}: {e}",
             recovery=[
-                "pip install pymobiledevice3",
-                "ensure USB device is trusted",
+                "pip install pymobiledevice3  (into the same interpreter)",
+                "set FRIDA_MCP_PYTHON to a Python that has pymobiledevice3",
+                "Windows example: set FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
             ],
+            python=sys.executable,
         )
     return create_using_usbmux, AfcService
+
+
+def cmd_preflight(_args: argparse.Namespace) -> None:
+    """Fast env check only — no USB. Exit 0/2 within milliseconds if import fails."""
+    try:
+        import pymobiledevice3  # noqa: F401
+    except ImportError as e:
+        fail(
+            "afc",
+            f"pymobiledevice3 not installed in {sys.executable}: {e}",
+            recovery=[
+                "pip install pymobiledevice3  (into the same interpreter)",
+                "set FRIDA_MCP_PYTHON to a Python that has pymobiledevice3",
+                "Windows example: set FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            ],
+            python=sys.executable,
+        )
+    ok(preflight=True, python=sys.executable, pymobiledevice3=True)
 
 
 async def _with_afc(udid: str, fn):
@@ -250,6 +270,9 @@ def cmd_rm_dcim(args: argparse.Namespace) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="frida-ios-mcp AFC helper")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    pf = sub.add_parser("preflight", help="Check pymobiledevice3 import only (no USB)")
+    pf.set_defaults(func=cmd_preflight)
 
     sp = sub.add_parser("push")
     sp.add_argument("--udid", required=True)

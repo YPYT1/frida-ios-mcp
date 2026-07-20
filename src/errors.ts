@@ -215,22 +215,33 @@ export const PROBE_HELP = {
     type: "smart_type_text when field needs focus; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
     system_alert:
-      "sb_alert_trigger (force default false) → sb_alert_list (hasAlert) → single: sb_alert_dismiss (post-settle cleared) | stacked: sb_alert_dismiss({all:true}); if needsRetry re-list/retry all; never parallel tap+dismiss → app screen_snapshot",
+      "sb_alert_trigger (force default false) → sb_alert_list (live+raw counts; raw may > live) → single dismiss post-settle | stacked/unsure: sb_alert_dismiss({all:true}) — do not trust actionViewCount===1 after force; never parallel tap+dismiss → app screen_snapshot",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
     media:
-      "photos_import_file({localPath, mediaType}) → photos_list → (publish in TikTok UI) → photos_clear; needs Python+pymobiledevice3; Photos spawn may steal foreground briefly",
+      "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; Photos may steal foreground briefly",
+    system_alert_stack:
+      "force stacks layers; list live count can undercount — always sb_alert_dismiss({all:true}) when unsure",
   },
   media: {
     primary: "photos_import_file",
     steps: [
-      "1) photos_import_file({ localPath, mediaType: image|video }) — AFC + Photos PhotoKit",
-      "2) photos_list — confirm localIdentifier in untrashed assets",
+      "0) Pin Python: set FRIDA_MCP_PYTHON to interpreter WITH pymobiledevice3 (MCP does not pip install)",
+      "1) photos_import_file({ localPath, mediaType: image|video }) — jpg or small mp4",
+      "2) photos_list — optional mediaType / idPrefix filters; confirm localIdentifier",
       "3) session_open TikTok → publish UI (not in this MCP yet)",
       "4) photos_clear — trash untrashed media (Recently Deleted, not permanent wipe)",
     ],
     host: "Photos.app only (com.apple.mobileslideshow). Never import via TikTok agent.",
-    afc: "scripts/afc_tool.py via pymobiledevice3; stage=afc/upload if missing",
-    note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db.",
+    afc: "scripts/afc_tool.py; preflight ≤5s → stage=afc if pymobiledevice3 missing",
+    env: {
+      FRIDA_MCP_PYTHON:
+        "Absolute path to python.exe that has pymobiledevice3 (preferred over bare 'python' on PATH)",
+      cursor_mcp_example:
+        'env: { "FRIDA_MCP_PYTHON": "C:\\\\Users\\\\You\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe" }',
+      windows_cli:
+        "set FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    },
+    note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db. No auto pip install.",
   },
   typing: {
     steps: [

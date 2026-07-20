@@ -834,7 +834,7 @@ class SessionStore {
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
       next: hasAlert
-        ? 'sb_alert_tap(title) or sb_alert_dismiss({ all: true }) if stacked; then app screen_snapshot'
+        ? 'Unsure if stacked (live count can undercount) → sb_alert_dismiss({ all: true }); then app screen_snapshot'
         : "No SB alert — continue with app screen_snapshot",
     };
   }

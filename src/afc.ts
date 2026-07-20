@@ -1,14 +1,19 @@
 /**
  * AFC side channel via scripts/afc_tool.py (pymobiledevice3).
- * No fleetcontrol HTTP. Fail loudly if Python/pymobiledevice3 missing.
+ * No fleetcontrol HTTP. Fail loudly + fast if Python/pymobiledevice3 missing.
  */
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StageError } from "./errors.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** Preflight (import pymobiledevice3 only) — must fail within this window */
+const PREFLIGHT_MS = 5_000;
+/** USB AFC ops (push/list/rm) */
+const AFC_OP_MS = 120_000;
 
 export function afcScriptPath(): string {
   // dist/afc.js → ../scripts ; src via tsx → ../scripts
@@ -24,15 +29,36 @@ export function afcScriptPath(): string {
   ]);
 }
 
-export type AfcJson = Record<string, unknown> & { ok?: boolean; stage?: string; error?: string };
+export type AfcJson = Record<string, unknown> & {
+  ok?: boolean;
+  stage?: string;
+  error?: string;
+  recovery?: string[];
+};
 
-function pythonBin(): string {
+export function pythonBin(): string {
   return process.env.FRIDA_MCP_PYTHON || process.env.PYTHON || "python";
 }
 
-export async function runAfcTool(
+const AFC_RECOVERY = [
+  "pip install pymobiledevice3  (into the SAME interpreter MCP uses)",
+  "set FRIDA_MCP_PYTHON to that python.exe (do not rely on PATH alone)",
+  "Windows example: FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+  "Cursor MCP env: { \"FRIDA_MCP_PYTHON\": \"C:\\\\…\\\\python.exe\" }",
+  "MCP will NOT auto pip-install",
+];
+
+function killChild(child: ChildProcess): void {
+  try {
+    child.kill();
+  } catch {
+    /* ignore */
+  }
+}
+
+function spawnAfc(
   args: string[],
-  timeoutMs = 120_000,
+  timeoutMs: number,
 ): Promise<AfcJson> {
   const script = afcScriptPath();
   const bin = pythonBin();
@@ -43,13 +69,22 @@ export async function runAfcTool(
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
     const timer = setTimeout(() => {
-      child.kill();
+      if (settled) return;
+      settled = true;
+      killChild(child);
       reject(
-        new StageError("afc", `afc_tool timed out after ${timeoutMs}ms`, [
-          "check USB / pymobiledevice3",
-          "retry media_upload or photos_list",
-        ]),
+        new StageError(
+          "afc",
+          `afc_tool timed out after ${timeoutMs}ms (bin=${bin}, args=${args[0] ?? ""})`,
+          [
+            ...AFC_RECOVERY,
+            timeoutMs <= PREFLIGHT_MS
+              ? "preflight hung — wrong/broken python binary?"
+              : "USB/AFC may be stuck — unplug/replug or unlock device",
+          ],
+        ),
       );
     }, timeoutMs);
 
@@ -60,20 +95,20 @@ export async function runAfcTool(
       stderr += String(d);
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(
         new StageError(
           "afc",
           `failed to spawn ${bin}: ${err.message}`,
-          [
-            "install Python 3",
-            "pip install pymobiledevice3",
-            "set FRIDA_MCP_PYTHON if python is not on PATH",
-          ],
+          ["install Python 3", ...AFC_RECOVERY],
         ),
       );
     });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
       let parsed: AfcJson | null = null;
@@ -87,9 +122,9 @@ export async function runAfcTool(
           new StageError(
             String(parsed.stage || "afc"),
             String(parsed.error || "AFC tool failed"),
-            Array.isArray(parsed.recovery)
+            Array.isArray(parsed.recovery) && parsed.recovery.length
               ? (parsed.recovery as string[])
-              : ["pip install pymobiledevice3", "check USB trust", "retry"],
+              : AFC_RECOVERY,
             { detail: parsed },
           ),
         );
@@ -99,13 +134,9 @@ export async function runAfcTool(
         reject(
           new StageError(
             "afc",
-            `afc_tool exit=${code}: ${stderr.trim() || stdout.trim() || "no output"}`,
-            [
-              "pip install pymobiledevice3",
-              "python scripts/afc_tool.py push --help",
-              "check device USB + trust dialog",
-            ],
-            { detail: { stdout, stderr, code } },
+            `afc_tool exit=${code}: ${stderr.trim() || stdout.trim() || "no output"} (bin=${bin})`,
+            AFC_RECOVERY,
+            { detail: { stdout, stderr, code, bin } },
           ),
         );
         return;
@@ -113,6 +144,44 @@ export async function runAfcTool(
       resolve(parsed);
     });
   });
+}
+
+/** Cached preflight: only re-run after hard failure or process restart */
+let preflightCache: { bin: string; ok: true } | null = null;
+
+/**
+ * Verify python + pymobiledevice3 within PREFLIGHT_MS (default 5s).
+ * Does not touch USB. MCP never auto pip-installs.
+ */
+export async function afcPreflight(): Promise<AfcJson> {
+  const bin = pythonBin();
+  if (preflightCache && preflightCache.bin === bin) {
+    return { ok: true, preflight: true, cached: true, python: bin };
+  }
+  try {
+    const r = await spawnAfc(["preflight"], PREFLIGHT_MS);
+    preflightCache = { bin, ok: true };
+    return r;
+  } catch (e) {
+    preflightCache = null;
+    throw e;
+  }
+}
+
+/** @internal test helper — clear preflight cache */
+export function resetAfcPreflightCache(): void {
+  preflightCache = null;
+}
+
+export async function runAfcTool(
+  args: string[],
+  timeoutMs = AFC_OP_MS,
+): Promise<AfcJson> {
+  // Always preflight first so missing pymobiledevice3 fails in ≤5s, not 120s
+  if (args[0] !== "preflight") {
+    await afcPreflight();
+  }
+  return spawnAfc(args, timeoutMs);
 }
 
 export async function afcPush(opts: {
@@ -146,20 +215,24 @@ export async function afcPush(opts: {
   };
 }
 
+export type PhotosListAsset = {
+  localIdentifier: string;
+  filename?: string | null;
+  mediaType?: string;
+  uuid?: string;
+  directory?: string | null;
+  pk?: number;
+};
+
 export async function afcListUntrashed(udid: string): Promise<{
   count: number;
-  assets: Array<{
-    localIdentifier: string;
-    filename?: string | null;
-    mediaType?: string;
-    uuid?: string;
-  }>;
+  assets: PhotosListAsset[];
   udid: string;
 }> {
   const r = await runAfcTool(["list-untrashed", "--udid", udid]);
   return {
     count: Number(r.count ?? 0),
-    assets: Array.isArray(r.assets) ? (r.assets as never[]) : [],
+    assets: Array.isArray(r.assets) ? (r.assets as PhotosListAsset[]) : [],
     udid: String(r.udid ?? udid),
   };
 }

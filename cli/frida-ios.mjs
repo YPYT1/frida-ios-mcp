@@ -112,7 +112,8 @@ ${SESSION_HINT}
 Notes:
   - net_dump: redact + drop data: URLs + fold binary by default.
   - App acts are serialized in-process; App+SB dual parallel is OK.
-  - photos_*: AFC needs Python + pymobiledevice3 (scripts/afc_tool.py).
+  - photos_*: set FRIDA_MCP_PYTHON to python.exe with pymobiledevice3 (preflight ≤5s).
+  - photos_import_file accepts image or small mp4 (--mediaType video).
   - Requires: pnpm build  (uses dist/backend.js)
 `.trim();
 

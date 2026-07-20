@@ -113,7 +113,13 @@ function actionViewIsLive(v) {
     }
 }
 
-function collectActionViews() {
+/**
+ * @param {{ liveOnly?: boolean }} opts
+ * liveOnly=true (default for dismiss remaining): drop detached/hidden views.
+ * liveOnly=false: raw chooseSync list (stack depth may be higher than live count).
+ */
+function collectActionViews(opts) {
+    const liveOnly = !opts || opts.liveOnly !== false;
     const out = [];
     const Cls = ObjC.classes._UIInterfaceActionCustomViewRepresentationView;
     if (!Cls) return out;
@@ -121,7 +127,7 @@ function collectActionViews() {
         const arr = ObjC.chooseSync(Cls);
         for (let i = 0; i < arr.length; i++) {
             const v = arr[i];
-            if (!actionViewIsLive(v)) continue;
+            if (liveOnly && !actionViewIsLive(v)) continue;
             let title = '';
             try {
                 const action = v.action && v.action();
@@ -138,9 +144,10 @@ function collectActionViews() {
     return out;
 }
 
+/** Strict live remaining — used by dismiss cleared/remaining (post-settle). */
 function remainingSnapshot() {
     const alerts = collectAlertObjects();
-    const actions = collectActionViews();
+    const actions = collectActionViews({ liveOnly: true });
     return {
         alertCount: alerts.length,
         actionViewCount: actions.length,
@@ -152,29 +159,44 @@ function remainingSnapshot() {
 
 const LIST_NOTE =
     'alerts=SBUserNotificationAlert instances; actionViews=tappable buttons (test alerts often ONLY actionViews). ' +
-    'Visible if hasAlert (actionViewCount>0 || alertCount>0) — do NOT judge by alertCount alone. ' +
-    'Location: prefer deny/cancel via sb_alert_dismiss or sb_alert_tap. Stacked: sb_alert_dismiss({all:true}).';
+    'hasAlert = actionViewCount>0 || alertCount>0 (live counts). actionViewCountRaw may be higher — live filter can undercount mid-animation stacks. ' +
+    'Do NOT use actionViewCount===1 to decide single-layer after force. Unsure if stacked → sb_alert_dismiss({all:true}). ' +
+    'Location: prefer deny/cancel via sb_alert_dismiss or sb_alert_tap.';
 
 export function sbAlertList() {
     return new Promise(function (resolve) {
         ObjC.schedule(ObjC.mainQueue, function () {
             try {
-                const rem = remainingSnapshot();
+                const alerts = collectAlertObjects();
+                const liveActions = collectActionViews({ liveOnly: true });
+                const rawActions = collectActionViews({ liveOnly: false });
                 let keyWindow = null;
                 try {
                     const app = ObjC.classes.UIApplication.sharedApplication();
                     const w = app.keyWindow();
                     if (w && !w.handle.isNull()) keyWindow = String(w.$className || '');
                 } catch (_e) { /* */ }
+                const alertCount = alerts.length;
+                const actionViewCount = liveActions.length;
+                const actionViewCountRaw = rawActions.length;
                 resolve({
                     ok: true,
                     keyWindow,
-                    alertCount: rem.alertCount,
-                    actionViewCount: rem.actionViewCount,
-                    hasAlert: rem.hasAlert,
-                    alerts: rem.alerts,
-                    actionViews: rem.actionViews,
+                    alertCount,
+                    actionViewCount,
+                    actionViewCountRaw,
+                    alertCountRaw: alertCount,
+                    // Primary hasAlert uses live (same as dismiss remaining); raw is advisory for stacks
+                    hasAlert: actionViewCount > 0 || alertCount > 0,
+                    hasAlertRaw: actionViewCountRaw > 0 || alertCount > 0,
+                    alerts,
+                    actionViews: liveActions,
+                    actionViewsRaw: rawActions,
                     note: LIST_NOTE,
+                    hint:
+                        actionViewCountRaw > actionViewCount
+                            ? 'raw>live: prefer sb_alert_dismiss({all:true}) if force-stacked'
+                            : 'if force was used, still prefer all:true rather than counting layers by eye',
                 });
             } catch (e) {
                 resolve({ ok: false, error: String(e.message || e) });

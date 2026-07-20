@@ -307,8 +307,9 @@ export function createMcpServer(): McpServer {
   server.tool(
     "sb_alert_list",
     [
-      "List SpringBoard alerts. hasAlert = actionViewCount>0 || alertCount>0 (test alerts often only actionViews).",
-      "Do not judge by alertCount alone. After dismiss → app screen_snapshot.",
+      "List SpringBoard alerts. Live actionViewCount + actionViewCountRaw (raw may be higher; live can undercount stacks).",
+      "hasAlert if either count path shows UI. After force: do not trust actionViewCount===1 — use sb_alert_dismiss({all:true}).",
+      "After dismiss → app screen_snapshot.",
     ].join(" "),
     {},
     async () => toolResult(await run("sb_alert_list")),
@@ -554,7 +555,11 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "photos_import_file",
-    "One-shot: AFC upload + Photos ensure + PhotoKit import + optional sqlite verify. Preferred for AI. Needs pymobiledevice3.",
+    [
+      "One-shot: AFC upload + Photos ensure + PhotoKit import + optional sqlite verify. Preferred for AI.",
+      "Needs FRIDA_MCP_PYTHON with pymobiledevice3 (no auto pip). Missing deps → stage=afc in ≤5s.",
+      "Accepts image or small mp4 (mediaType=video).",
+    ].join(" "),
     {
       udid: z.string().optional(),
       localPath: z.string().describe("PC file path"),
@@ -569,8 +574,20 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "photos_list",
-    "Pull Photos.sqlite via AFC; list untrashed image/video (localIdentifier, filename). Not Recently Deleted.",
-    { udid: z.string().optional() },
+    [
+      "Pull Photos.sqlite via AFC; list untrashed assets (not Recently Deleted).",
+      "Optional mediaType=image|video and idPrefix/localIdentifier filter. Default = all untrashed.",
+      "Needs FRIDA_MCP_PYTHON with pymobiledevice3 (fast-fail stage=afc if missing).",
+    ].join(" "),
+    {
+      udid: z.string().optional(),
+      mediaType: z.enum(["image", "video"]).optional(),
+      idPrefix: z
+        .string()
+        .optional()
+        .describe("Match uuid or localIdentifier prefix/substring"),
+      localIdentifier: z.string().optional().describe("Same as idPrefix match"),
+    },
     async (args) => toolResult(await run("photos_list", args)),
   );
 

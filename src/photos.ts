@@ -343,17 +343,46 @@ export async function mediaUpload(opts: {
   }
 }
 
-export async function photosList(opts: { udid?: string } = {}) {
+export async function photosList(
+  opts: {
+    udid?: string;
+    /** Filter by media type (default: all untrashed) */
+    mediaType?: "image" | "video";
+    /** Match uuid or localIdentifier prefix / substring */
+    idPrefix?: string;
+    localIdentifier?: string;
+  } = {},
+) {
   const udid = await resolveUdid(opts.udid);
   // Prefer kill Photos so sqlite is not locked
   await photosChannel.close({ kill: true });
   const r = await afcListUntrashed(udid);
+  let assets = r.assets;
+  const filters: Record<string, string | undefined> = {};
+  if (opts.mediaType === "image" || opts.mediaType === "video") {
+    assets = assets.filter((a) => a.mediaType === opts.mediaType);
+    filters.mediaType = opts.mediaType;
+  }
+  const idQ = (opts.localIdentifier || opts.idPrefix || "").trim();
+  if (idQ) {
+    const q = idQ.toLowerCase();
+    assets = assets.filter((a) => {
+      const lid = String(a.localIdentifier || "").toLowerCase();
+      const uuid = String(a.uuid || "").toLowerCase();
+      return lid.includes(q) || uuid.includes(q) || lid.startsWith(q) || uuid.startsWith(q);
+    });
+    filters.idPrefix = idQ;
+  }
   return {
     ok: true as const,
     stage: "verify" as const,
-    ...r,
+    udid: r.udid,
+    count: assets.length,
+    totalUnfiltered: r.count,
+    assets,
+    filters: Object.keys(filters).length ? filters : undefined,
     note:
-      "Untrashed PHAssets only. Album UI Recents should match after PhotoKit import (localIdentifier).",
+      "Untrashed PHAssets only (default all). Optional mediaType=image|video and idPrefix/localIdentifier filter. Recents ≈ PhotoKit localIdentifier.",
   };
 }
 

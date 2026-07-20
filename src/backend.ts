@@ -463,8 +463,16 @@ export async function handleMethod(
         return jsonResult(r);
       }
       case "photos_list": {
+        const mediaType = String(params.mediaType ?? "").toLowerCase();
         const r = await photosList({
           udid: typeof params.udid === "string" ? params.udid : undefined,
+          mediaType:
+            mediaType === "image" || mediaType === "video" ? mediaType : undefined,
+          idPrefix: typeof params.idPrefix === "string" ? params.idPrefix : undefined,
+          localIdentifier:
+            typeof params.localIdentifier === "string"
+              ? params.localIdentifier
+              : undefined,
         });
         return jsonResult(r);
       }

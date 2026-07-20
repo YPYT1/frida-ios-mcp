@@ -50,23 +50,48 @@ kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject age
 
 ### Media import (PhotoKit, no fleetcontrol HTTP)
 
-Requires **Python 3** + **`pip install pymobiledevice3`** (AFC). Failures report `stage: upload|afc|attach|import|verify`.
+Requires **Python 3** with **`pymobiledevice3`** on the interpreter MCP actually runs (AFC).  
+MCP **does not** `pip install` for you. Missing deps → **`stage: afc` within ~5s** (preflight), not a 120s hang.
+
+**Pin the interpreter** (recommended on Windows):
 
 ```bash
-# one-shot PC file → Photos Recents
+# CLI
+set FRIDA_MCP_PYTHON=C:\Users\You\AppData\Local\Programs\Python\Python312\python.exe
+"%FRIDA_MCP_PYTHON%" -m pip install pymobiledevice3
+```
+
+Cursor / Claude MCP config example:
+
+```json
+{
+  "mcpServers": {
+    "frida-ios": {
+      "command": "node",
+      "args": ["D:/Project/tk/frida-mcp/dist/index.js"],
+      "env": {
+        "FRIDA_MCP_PYTHON": "C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
+      }
+    }
+  }
+}
+```
+
+```bash
+# image or small mp4 (video path)
 pnpm cli call photos_import_file --localPath D:\path\to\clip.mp4 --mediaType video
-pnpm cli call photos_list
+pnpm cli call photos_list --mediaType video
 pnpm cli call photos_clear
 ```
 
 | Tool | Role |
 |------|------|
-| `photos_import_file` | Upload + ensure Photos + PhotoKit import (+ sqlite verify) |
+| `photos_import_file` | Upload + ensure Photos + PhotoKit import (+ sqlite verify); image **or** video |
 | `media_upload` / `photos_ensure` / `photos_import` | Split steps for retry |
-| `photos_list` | Untrashed assets from Photos.sqlite via AFC |
+| `photos_list` | Untrashed assets; optional `mediaType` / `idPrefix` |
 | `photos_clear` | Trash untrashed media (Recently Deleted), optional DCIM cleanup |
 
-AFC helper: `scripts/afc_tool.py` (push / list-untrashed / rm-dcim). Host process is always **Photos.app** (`com.apple.mobileslideshow`), never TikTok.
+AFC helper: `scripts/afc_tool.py` (`preflight` / push / list-untrashed / rm-dcim). Host = **Photos.app** only.
 
 ```text
 session_open { bundleId: TikTok, withSpringBoard: true }
