@@ -200,12 +200,29 @@ export function sbAlertTap(title) {
 
 /**
  * Trigger a synthetic system alert via SBAlertItemTestRecipe (iOS 16 jailbreak path).
- * Used only for probing sb_alert_list / sb_alert_tap — not production UX.
+ * force=false (default): skip if an alert/actionView is already visible (prevent stacking).
  */
-export function sbAlertTrigger() {
+export function sbAlertTrigger(force) {
+    const allowStack = !!force;
     return new Promise(function (resolve) {
         ObjC.schedule(ObjC.mainQueue, function () {
             try {
+                const alerts = collectAlertObjects();
+                const actions = collectActionViews();
+                if (!allowStack && (alerts.length > 0 || actions.length > 0)) {
+                    resolve({
+                        ok: true,
+                        skipped: true,
+                        reason: 'alert_already_present',
+                        alertCount: alerts.length,
+                        actionViewCount: actions.length,
+                        alerts: alerts,
+                        actionViews: actions,
+                        hint: 'sb_alert_tap(title) or sb_alert_dismiss first; pass force:true only if you need another layer',
+                    });
+                    return;
+                }
+
                 const Recipe = ObjC.classes.SBAlertItemTestRecipe;
                 if (!Recipe) {
                     resolve({
@@ -243,6 +260,7 @@ export function sbAlertTrigger() {
                 }
                 resolve({
                     ok: true,
+                    skipped: false,
                     method: 'SBAlertItemTestRecipe.handleVolumeIncrease',
                     titleHint: 'Dismiss / test alert (varies by iOS)',
                     hint: 'Next: sb_alert_list → sb_alert_tap("Dismiss") or matching button title',

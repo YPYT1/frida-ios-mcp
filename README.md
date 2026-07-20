@@ -93,7 +93,10 @@ pnpm cli close
 - `summaryOnly: true` for host counts only  
 - `redact:false` / `includeDataUrls` / `includeBinaryBodies` only on trusted local machines — never paste raw dumps into issues/PRs.
 
-**Typing:** nav labels /「有什麼想法」「有什麼好事」are **not** text fields (`NOT_INPUT`). Search real fields: `search: "搜尋|Search|留言"`.
+**Typing (real input path):** Feed → tap **search** → `wait` → `screen_snapshot({ search: "Search|Cancel|搜尋|搜索|取消" })` → `smart_type_text` on the **input box** ref (not a nav label).  
+Nav tabs / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`; do not retry those refs.
+
+**SB test alert:** `sb_alert_trigger` (no stack if one already open; `force:true` to stack) → `sb_alert_list` → `sb_alert_tap("Dismiss")`.
 
 **Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): only registered if `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
 
@@ -176,36 +179,38 @@ FRIDA_MCP_MODE = "daemon"
 | `screen_snapshot` / `screen_search` | texts refs are generation-scoped (`g3t8`); tree mode does not wipe texts refs |
 | `tap` / `swipe` / `press_home` / `wait` | act |
 | `probe_help` | Recommended probe loop (call first) |
-| `type_text` | 拟人逐字 if already focused (`resnapshot` default true) |
-| `smart_type_text` | **preferred** tap→focus→拟人逐字 |
-| `clear_text` / `first_responder` / `human_pause` | focus/clear/step gap |
+| `type_text` | Humanized per-char typing into focused field (`resnapshot` default true) |
+| `smart_type_text` | **Preferred:** tap → focus → humanized typing |
+| `clear_text` / `first_responder` / `human_pause` | focus / clear / step-gap pause |
 | `double_tap` | double-tap like at ref/x,y |
 | `set_otp` | TikTok OTP fill (`setOtpCode`) |
-| `set_text_at_point` | coordinate setText (not humanized) |
-| `dump_modal` | mid-screen modal (blocked on TikTok) |
-| `rpc_call` | whitelisted agent RPC (debug) |
+| `set_text_at_point` | coordinate setText (not humanized; debug) |
+| `dump_modal` | mid-screen modal (blocked on TikTok; debug) |
+| `rpc_call` | whitelisted agent RPC (debug; needs `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`) |
 | `process_list` | device processes (pid/name) |
-| `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
+| `sb_alert_trigger` / `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
 | `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession capture (TLS plaintext after app decrypt) |
 
 Refs expire after `tap`/`swipe` and across snapshot generations. Off-screen / zero-size nodes are marked and rejected on `tap`.
 
-### 逐字拟人输入（inputText）
+### Humanized typing (`inputText`)
 
-Agent: `agent/text_input/comment.js` — same as fleetcontrol.
+Agent: `agent/text_input/comment.js` (same approach as fleetcontrol).
 
-| MCP tool | fleetcontrol 对应 | 行为 |
-|----------|-------------------|------|
-| `type_text` | `TypeTextAction` / HumanTypeInField | 已获焦，逐字 `inputText` |
-| `smart_type_text` | `SmartTypeTextAction` | tap → 等 firstResponder → `human_pause` → 逐字 |
-| `human_pause` | `human_pause(min,max)` | 步骤间隙随机 sleep（非打字延迟） |
+| MCP tool | fleetcontrol counterpart | Behavior |
+|----------|--------------------------|----------|
+| `type_text` | `TypeTextAction` / HumanTypeInField | Field already focused; per-char `inputText` |
+| `smart_type_text` | `SmartTypeTextAction` | tap → wait firstResponder → `human_pause` → type |
+| `human_pause` | `human_pause(min,max)` | Random gap between steps (not inter-key delay) |
 
-- 默认 `perCharDelayMs=90`，agent 内 `randomDelay(base, jitter≈base)`（jitter≥30）
-- 插入路径：`insertText` → `replaceRange` → 内层 `insertText` → `setText`+通知
-- **`screen_snapshot` 默认** `onScreenOnly=true` `limit=40`；可选 `search` / `showDiff`
-- **`tap` / `swipe` / `smart_type_text` 默认 `resnapshot=true`**（返回 `snapshot` 字段）
-- 错误返回 `{ code, recovery[] }`（如 `SCRIPT_DESTROYED` → respawn）
-- 日常探测先 `probe_help`；避免 `rpc_call` / `dump_modal` / `set_text_at_point`
+- Default `perCharDelayMs=90`; agent adds `randomDelay(base, jitter≈base)` (jitter ≥ 30ms).
+- Insert fallbacks: `insertText` → `replaceRange` → inner `insertText` → `setText` + notify.
+- Nav tabs / chips like “Home” or “What's on your mind” are **not** inputs → `NOT_INPUT` (session stays alive).
+- Prefer `smart_type_text` on a real field ref; use `first_responder` if unsure (`canInsertText`).
+- `screen_snapshot` defaults: `onScreenOnly=true`, `limit=40`; optional `search` / `showDiff`.
+- `tap` / `swipe` / `smart_type_text` default `resnapshot=true` (returns `snapshot`).
+- Errors return `{ code, recovery[] }` (e.g. `SCRIPT_DESTROYED` → respawn).
+- Start probes with `probe_help`; debug tools need `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
 
 ### Network capture
 

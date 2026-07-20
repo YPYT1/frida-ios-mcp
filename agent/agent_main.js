@@ -71,7 +71,7 @@ rpc.exports = {
     sbAlertList:    ()                   => sbAlertList(),
     sbAlertTap:     (title)              => sbAlertTap(title),
     sbAlertDismiss: (policy)             => sbAlertDismiss(policy),
-    sbAlertTrigger: ()                   => sbAlertTrigger(),
+    sbAlertTrigger: (force)              => sbAlertTrigger(!!force),
 };
 
 send({ type: 'ready' });

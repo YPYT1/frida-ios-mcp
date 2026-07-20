@@ -167,17 +167,19 @@ export const PROBE_HELP = {
     type: "smart_type_text when field needs focus; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
     system_alert:
-      "sb_alert_trigger (test) → sb_alert_list → sb_alert_tap/dismiss → screen_snapshot",
+      "sb_alert_trigger (force default false — skips if alert already present) → sb_alert_list → sb_alert_tap/dismiss → screen_snapshot",
     dead_session: "session_respawn → wait → screen_snapshot (login may reset)",
   },
   typing: {
     steps: [
-      'screen_snapshot({ search: "搜尋|搜索|Search|留言|评论|輸入" })',
-      "Use only real field refs (UITextField-like). Nav/tabs/chips → NOT_INPUT",
-      "smart_type_text({ text, ref }) — retryOnFail default false",
-      "Avoid: 首頁/好友/發佈/有什麼好事/有什麼想法 (not inputs)",
-      "If unsure: first_responder after tap; require canInsertText before type_text",
+      "1) On Feed, tap search entry (region text varies: 搜尋 / 搜索 / Search — not 首頁/好友/nav)",
+      "2) wait { ms: 1500-2500 }",
+      '3) screen_snapshot({ search: "搜尋|搜索|Search|取消|Cancel" }) — pick INPUT box ref, not nav labels',
+      "4) smart_type_text({ text: \"hello\", ref }) — retryOnFail default false",
+      "5) If NOT_INPUT: switch ref; never retry-tap 有什麼好事/有什麼想法/發佈 chips or nav chrome",
+      "6) Optional: first_responder — need canInsertText:true before type_text",
     ],
+    note: "Device must be past safety/login walls; real search-box typing needs a live device — no guaranteed path on locked accounts.",
   },
   avoid: [
     "rpc_call / dump_modal / set_text_at_point — DEBUG only (set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1)",

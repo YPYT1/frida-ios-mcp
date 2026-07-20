@@ -313,9 +313,17 @@ export function createMcpServer(): McpServer {
 
   server.tool(
     "sb_alert_trigger",
-    "Create a test system alert via SBAlertItemTestRecipe.handleVolumeIncrease (probe only). Next: sb_alert_list → sb_alert_tap.",
-    {},
-    async () => toolResult(await run("sb_alert_trigger")),
+    [
+      "Create a test system alert (SBAlertItemTestRecipe). Default force=false: skip if alert already present (no stack).",
+      "force:true stacks another. Next: sb_alert_list → sb_alert_tap(\"Dismiss\").",
+    ].join(" "),
+    {
+      force: z
+        .boolean()
+        .optional()
+        .describe("Default false — do not stack if actionViews/alerts already exist"),
+    },
+    async ({ force }) => toolResult(await run("sb_alert_trigger", { force })),
   );
 
   server.tool(
@@ -463,8 +471,8 @@ export function createMcpServer(): McpServer {
   server.tool(
     "net_dump",
     [
-      "Quiet HTTP dump. Default: redact secrets, DROP data: URLs, FOLD binary bodies.",
-      "includeDataUrls/includeBinaryBodies default false. summaryOnly=host counts. redact=false only locally.",
+      "Quiet HTTP dump. rawCount=buffer size; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies=stats.",
+      "Default: redact secrets, DROP data: URLs, FOLD binary bodies. summaryOnly=host counts.",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),

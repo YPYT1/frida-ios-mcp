@@ -72,13 +72,15 @@ function toParams(parsed) {
   return params;
 }
 
-const SESSION_HINT = `
-Sessions (CLI vs MCP):
-  - This CLI process has its OWN sessionStore — it does NOT see Cursor/Grok MCP sessions.
-  - Embedded MCP = another process, separate inject/state.
-  - To SHARE one Frida session: start the daemon, then set FRIDA_MCP_MODE=daemon for both MCP and CLI.
-  - Without daemon, open/close here only affects this CLI process.
+const SESSION_BANNER = `
+=== Sessions (read first) ===
+1) CLI ≠ MCP: this process has its OWN session (Cursor cannot see it).
+2) Share one Frida session → run daemon + FRIDA_MCP_MODE=daemon on both sides.
+3) Without daemon: open/close here only affects this CLI.
+=============================
 `.trim();
+
+const SESSION_HINT = SESSION_BANNER;
 
 const HELP = `
 frida-ios CLI (same handleMethod as MCP; separate process session by default)
@@ -155,15 +157,16 @@ async function main() {
       {
         const result = await handleMethod(method, params);
         const text = result.content?.[0]?.text ?? JSON.stringify(result);
-        print(text);
         try {
           const j = JSON.parse(text);
           if (!j.open && !j.alive) {
-            print("\n" + SESSION_HINT);
+            // Banner FIRST so first-time users see it before JSON
+            print(SESSION_BANNER + "\n");
           }
         } catch {
           /* ignore */
         }
+        print(text);
         if (result.isError) process.exitCode = 1;
         return;
       }

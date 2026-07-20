@@ -213,11 +213,18 @@ export function quietNetDump(
     }
     entries.push(q);
   }
+  const returned = entries.length;
   return {
-    ...dump,
+    // Do not spread dump.count/returned from agent — redefine clearly:
+    enabled: dump.enabled,
+    opts: dump.opts,
     entries,
-    count: entries.length,
+    /** Capture buffer size before quiet filters (agent ring / pre-filter list) */
     rawCount: rawEntries.length,
+    /** entries.length after drop/fold — same as returned */
+    returned,
+    /** Alias of returned (kept for old clients; always === returned) */
+    count: returned,
     droppedDataUrls,
     foldedBinaryBodies: foldedBinary,
     redacted: redact,
@@ -226,9 +233,11 @@ export function quietNetDump(
       includeBinaryBodies: opts.includeBinaryBodies === true,
       redact,
     },
-    note: redact
-      ? "Secrets redacted; data: URLs dropped and binary bodies folded by default. Pass includeDataUrls/includeBinaryBodies true or redact:false only on trusted machines."
-      : "redact=false: may contain secrets. Do not paste into issues/PRs.",
+    note:
+      "rawCount=buffer before quiet filter; droppedDataUrls/foldedBinaryBodies=filter stats; returned(=count)=entries.length. " +
+      (redact
+        ? "Default: secrets redacted, data: URLs dropped, binary bodies folded."
+        : "redact=false: may contain secrets — never paste into issues/PRs."),
   };
 }
 

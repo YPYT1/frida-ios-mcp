@@ -839,15 +839,19 @@ class SessionStore {
     };
   }
 
-  async sbAlertTrigger(): Promise<unknown> {
-    const r = (await this.sbRpc("sbAlertTrigger")) as Record<string, unknown>;
+  async sbAlertTrigger(opts: { force?: boolean } = {}): Promise<unknown> {
+    const force = opts.force === true;
+    const r = (await this.sbRpc("sbAlertTrigger", [force])) as Record<string, unknown>;
     return {
       ...r,
+      force,
       appSession: this.appSessionBrief(),
       springboardAlive: !!this.sbLive?.alive,
-      next: r.ok
-        ? 'sb_alert_list → sb_alert_tap("Dismiss" or listed title)'
-        : "Check SpringBoard attach (sb_ensure) and iOS version support",
+      next: r.skipped
+        ? 'Alert already present — sb_alert_tap("Dismiss") or sb_alert_dismiss; force:true to stack another'
+        : r.ok
+          ? 'sb_alert_list → sb_alert_tap("Dismiss" or listed title)'
+          : "Check SpringBoard attach (sb_ensure) and iOS version support",
     };
   }
 
@@ -1300,9 +1304,11 @@ class SessionStore {
         summaryOnly: true,
         redacted: true,
         enabled: raw.enabled,
-        count: raw.count,
+        rawCount: entries.length,
+        returned: summary.hosts.length,
+        count: summary.hosts.length,
         ...summary,
-        note: "Host summary only (data: counted as (data-url)). Full: net_dump without summaryOnly.",
+        note: "summaryOnly: rawCount=capture entries; returned/count=distinct hosts. data: → host (data-url).",
       };
     }
     return quietNetDump(raw, quietOpts);

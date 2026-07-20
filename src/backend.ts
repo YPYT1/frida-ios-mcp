@@ -131,7 +131,9 @@ export async function handleMethod(
         });
       }
       case "sb_alert_trigger": {
-        const r = await sessionStore.sbAlertTrigger();
+        const r = await sessionStore.sbAlertTrigger({
+          force: Boolean(params.force),
+        });
         return jsonResult(r);
       }
       case "ping": {
