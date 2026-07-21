@@ -424,6 +424,44 @@ function fetchByLocalIdentifier(localId) {
     }
 }
 
+/** Brief untrashed library listing via PhotoKit (excludes Recently Deleted). */
+function listUntrashedAssets(limit) {
+    try {
+        const fwOk = ensurePhotosFramework();
+        if (!fwOk.ok) return { ok: false, error: fwOk.error, assets: [] };
+        const max = Math.max(1, Math.min(Number(limit) || 200, 500));
+        const PHAsset = ObjC.classes.PHAsset;
+        const PHFetchOptions = ObjC.classes.PHFetchOptions;
+        const NSSortDescriptor = ObjC.classes.NSSortDescriptor;
+        const options = PHFetchOptions.alloc().init();
+        try {
+            const desc = NSSortDescriptor.sortDescriptorWithKey_ascending_('creationDate', false);
+            options.setSortDescriptors_([desc]);
+        } catch (_) { }
+        const result = PHAsset.fetchAssetsWithOptions_(options);
+        const total = +result.count();
+        const n = Math.min(total, max);
+        const assets = [];
+        for (let i = 0; i < n; i++) {
+            const asset = result.objectAtIndex_(i);
+            const lid = asset.localIdentifier().toString();
+            const mediaType = +asset.mediaType(); // 1=image 2=video
+            assets.push({
+                localIdentifier: lid,
+                uuid: lid.split('/')[0],
+                mediaType: mediaType === 2 ? 'video' : 'image',
+                pixelWidth: +asset.pixelWidth(),
+                pixelHeight: +asset.pixelHeight(),
+                duration: +asset.duration(),
+                source: 'photokit',
+            });
+        }
+        return { ok: true, count: assets.length, total: total, assets: assets };
+    } catch (e) {
+        return { ok: false, error: String(e), stack: e.stack, assets: [] };
+    }
+}
+
 function safeString(value) {
     try {
         if (value === null || value === undefined) return null;
@@ -598,6 +636,7 @@ rpc.exports = {
     deleteVideoAssetsByLocalIdentifiers: deleteVideoAssetsByLocalIdentifiers,
     photoAuthStatus: photoAuthStatus,
     fetchByLocalIdentifier: fetchByLocalIdentifier,
+    listUntrashedAssets: listUntrashedAssets,
     probe: probeUrlAndClass,
 };
 

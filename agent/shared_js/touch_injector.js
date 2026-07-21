@@ -48,6 +48,8 @@ export function createInjector() {
                         touch:       null,
                         pending:     [],
                         previous:    null,
+                        // After spawn+resume, UIKit may not expose _touchesEvent for a few frames.
+                        nullEventRetries: 0,
                         onComplete:  function () {},
                         onError:     function () {},
                     });
@@ -116,8 +118,19 @@ export function createInjector() {
                         const app   = api.UIApplication.sharedApplication();
                         const event = app['- _touchesEvent'].call(app);
                         if (event === null || event.handle.isNull()) {
-                            throw new Error('UIApplication._touchesEvent returned null');
+                            // Soft retry on next CADisplayLink frame (attach-permanent-null still fails after budget).
+                            priv.nullEventRetries = (priv.nullEventRetries || 0) + 1;
+                            if (priv.nullEventRetries > 45) {
+                                throw new Error('UIApplication._touchesEvent returned null');
+                            }
+                            priv.pending.unshift(point);
+                            if (phase === UITouchPhaseBegan && priv.touch !== null) {
+                                try { priv.touch.release(); } catch (_) {}
+                                priv.touch = null;
+                            }
+                            return;
                         }
+                        priv.nullEventRetries = 0;
                         event['- _clearTouches'].call(event);
 
                         const abs = api.mach_absolute_time();

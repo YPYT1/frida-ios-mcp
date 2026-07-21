@@ -311,6 +311,88 @@ export class PhotosChannel {
       return result;
     }, { udid: opts.udid, ensure: true });
   }
+
+  /** PhotoKit fetch by localIdentifier (in-memory; may ahead of Photos.sqlite). */
+  async fetchByLocalIdentifier(opts: {
+    localIdentifier: string;
+    udid?: string;
+    terminateAfter?: boolean;
+  }): Promise<Record<string, unknown>> {
+    return this.withPhotosRpc(async (live) => {
+      const result = (await callRpc(live.script, "fetchByLocalIdentifier", [
+        opts.localIdentifier,
+      ])) as Record<string, unknown>;
+      if (opts.terminateAfter) {
+        const { pid, device } = live;
+        await closeLiveSession(live);
+        this.live = null;
+        await this.killPid(device, pid);
+        await sleep(400);
+      }
+      return result;
+    }, { udid: opts.udid, ensure: true });
+  }
+
+  /** PhotoKit untrashed listing (fallback when AFC sqlite is empty / WAL lag). */
+  async listUntrashedPhotoKit(opts: {
+    udid?: string;
+    limit?: number;
+    terminateAfter?: boolean;
+  } = {}): Promise<{
+    ok: boolean;
+    count: number;
+    total?: number;
+    assets: Array<{
+      localIdentifier: string;
+      uuid?: string;
+      mediaType: "image" | "video";
+      pixelWidth?: number;
+      pixelHeight?: number;
+      duration?: number;
+      source?: string;
+    }>;
+    error?: string;
+  }> {
+    return this.withPhotosRpc(async (live) => {
+      const result = (await callRpc(live.script, "listUntrashedAssets", [
+        opts.limit ?? 200,
+      ])) as {
+        ok?: boolean;
+        count?: number;
+        total?: number;
+        assets?: Array<Record<string, unknown>>;
+        error?: string;
+      };
+      if (opts.terminateAfter !== false) {
+        const { pid, device } = live;
+        await closeLiveSession(live);
+        this.live = null;
+        await this.killPid(device, pid);
+        await sleep(400);
+      }
+      const assets = (result.assets || []).map((a) => ({
+        localIdentifier: String(a.localIdentifier || ""),
+        uuid: a.uuid
+          ? String(a.uuid)
+          : String(a.localIdentifier || "").split("/")[0],
+        mediaType: (a.mediaType === "video" ? "video" : "image") as
+          | "image"
+          | "video",
+        pixelWidth: typeof a.pixelWidth === "number" ? a.pixelWidth : undefined,
+        pixelHeight:
+          typeof a.pixelHeight === "number" ? a.pixelHeight : undefined,
+        duration: typeof a.duration === "number" ? a.duration : undefined,
+        source: "photokit",
+      }));
+      return {
+        ok: result.ok === true,
+        count: assets.length,
+        total: result.total,
+        assets,
+        error: result.error,
+      };
+    }, { udid: opts.udid, ensure: true });
+  }
 }
 
 export const photosChannel = new PhotosChannel();
@@ -351,6 +433,8 @@ export async function photosList(
     /** Match uuid or localIdentifier prefix / substring */
     idPrefix?: string;
     localIdentifier?: string;
+    /** When sqlite empty, list via PhotoKit (default true). Disable during import sqlite poll. */
+    allowPhotoKitFallback?: boolean;
   } = {},
 ) {
   const udid = await resolveUdid(opts.udid);
@@ -358,6 +442,7 @@ export async function photosList(
   await photosChannel.close({ kill: true });
   const r = await afcListUntrashed(udid);
   let assets = r.assets;
+  let source: "sqlite" | "photokit" = "sqlite";
   const filters: Record<string, string | undefined> = {};
   if (opts.mediaType === "image" || opts.mediaType === "video") {
     assets = assets.filter((a) => a.mediaType === opts.mediaType);
@@ -373,6 +458,38 @@ export async function photosList(
     });
     filters.idPrefix = idQ;
   }
+  // AFC sqlite can lag PhotoKit (WAL). Fall back when empty.
+  if (assets.length === 0 && opts.allowPhotoKitFallback !== false) {
+    try {
+      const pk = await photosChannel.listUntrashedPhotoKit({
+        udid,
+        limit: 200,
+        terminateAfter: true,
+      });
+      if (pk.ok && pk.assets.length) {
+        source = "photokit";
+        assets = pk.assets;
+        if (opts.mediaType === "image" || opts.mediaType === "video") {
+          assets = assets.filter((a) => a.mediaType === opts.mediaType);
+        }
+        if (idQ) {
+          const q = idQ.toLowerCase();
+          assets = assets.filter((a) => {
+            const lid = String(a.localIdentifier || "").toLowerCase();
+            const uuid = String(a.uuid || "").toLowerCase();
+            return (
+              lid.includes(q) ||
+              uuid.includes(q) ||
+              lid.startsWith(q) ||
+              uuid.startsWith(q)
+            );
+          });
+        }
+      }
+    } catch {
+      /* keep sqlite empty result */
+    }
+  }
   return {
     ok: true as const,
     stage: "verify" as const,
@@ -380,9 +497,12 @@ export async function photosList(
     count: assets.length,
     totalUnfiltered: r.count,
     assets,
+    source,
     filters: Object.keys(filters).length ? filters : undefined,
     note:
-      "Untrashed PHAssets only (default all). Optional mediaType=image|video and idPrefix/localIdentifier filter. Recents ≈ PhotoKit localIdentifier.",
+      source === "photokit"
+        ? "Listed via PhotoKit (Photos.sqlite empty/lag). Recents ≈ localIdentifier."
+        : "Untrashed PHAssets only (default all). Optional mediaType=image|video and idPrefix/localIdentifier filter. Recents ≈ PhotoKit localIdentifier.",
   };
 }
 
@@ -445,10 +565,11 @@ export async function photosImportFile(opts: {
   });
   let list: Awaited<ReturnType<typeof photosList>> | undefined;
   let verified = false;
-  // image: ~2s + 10×2s ≈ 22s; video: ~4s + 15×2.5s ≈ 41s (WAL lag with concurrent app sessions)
-  const firstWaitMs = isVideo ? 4000 : 2000;
-  const pollMs = isVideo ? 2500 : 2000;
-  const polls = isVideo ? 15 : 10;
+  let verifiedInPhotoKit = false;
+  // Prefer quicker sqlite probes; PhotoKit confirm is authoritative when WAL lags.
+  const firstWaitMs = isVideo ? 3000 : 1500;
+  const pollMs = isVideo ? 2000 : 1500;
+  const polls = isVideo ? 6 : 3;
   if (verify && imp.localIdentifier) {
     await sleep(firstWaitMs);
     for (let i = 0; i < polls; i++) {
@@ -456,6 +577,7 @@ export async function photosImportFile(opts: {
         udid: upload.udid,
         // Prefer type filter when listing for verify noise; fall back to full if miss
         mediaType: opts.mediaType,
+        allowPhotoKitFallback: false,
       });
       if (assetMatchesLocalId(list.assets, imp.localIdentifier)) {
         verified = true;
@@ -463,7 +585,10 @@ export async function photosImportFile(opts: {
       }
       // one full unfiltered pass if type filter empty-missed
       if (list.count === 0 || i === Math.floor(polls / 2)) {
-        const full = await photosList({ udid: upload.udid });
+        const full = await photosList({
+          udid: upload.udid,
+          allowPhotoKitFallback: false,
+        });
         list = full;
         if (assetMatchesLocalId(full.assets, imp.localIdentifier)) {
           verified = true;
@@ -472,18 +597,37 @@ export async function photosImportFile(opts: {
       }
       await sleep(pollMs);
     }
+    // Explicit PhotoKit id fetch if list still misses (sqlite-only empty + list filter miss)
+    if (!verified) {
+      try {
+        const fetched = await photosChannel.fetchByLocalIdentifier({
+          localIdentifier: imp.localIdentifier,
+          udid: upload.udid,
+          terminateAfter: true,
+        });
+        if (fetched.ok === true) {
+          verified = true;
+          verifiedInPhotoKit = true;
+        }
+      } catch {
+        /* leave unverified */
+      }
+    }
   }
 
   const needsRetry = verify && !verified;
   let note: string;
   if (!verify) {
     note = "PhotoKit localIdentifier set; verify skipped.";
+  } else if (verified && verifiedInPhotoKit) {
+    note =
+      "Import OK; confirmed via PhotoKit (Photos.sqlite may still lag — Recents should show it).";
   } else if (verified) {
     note =
       "Import OK; asset in Photos.sqlite untrashed list (Recents should show it).";
   } else {
     note =
-      "PhotoKit returned localIdentifier but sqlite verify missed (WAL lag or concurrent App session). " +
+      "PhotoKit returned localIdentifier but verify missed (WAL lag or concurrent App session). " +
       "Not a fake success: re-run photos_list({ idPrefix / mediaType }) or close other session_open and retry. " +
       (isVideo
         ? "Video: prefer no parallel session_open (e.g. Preferences/TikTok) during import."
@@ -500,7 +644,8 @@ export async function photosImportFile(opts: {
     mediaType: opts.mediaType,
     localIdentifier: imp.localIdentifier,
     elapsedMs: Date.now() - t0,
-    verifiedInSqlite: verify ? verified : undefined,
+    verifiedInSqlite: verify ? verified && !verifiedInPhotoKit : undefined,
+    verifiedInPhotoKit: verify ? verifiedInPhotoKit : undefined,
     needsRetry,
     appSessionOpenDuringImport: conflict.appSessionOpen || undefined,
     appSessionBundleId: conflict.bundleId,
@@ -526,7 +671,23 @@ export async function photosClear(opts: {
   const udid = await resolveUdid(opts.udid);
   await photosChannel.close({ kill: true });
   const before = await afcListUntrashed(udid);
-  const targetIds = before.assets.map((a) => a.localIdentifier).filter(Boolean);
+  let targetIds = before.assets.map((a) => a.localIdentifier).filter(Boolean);
+  let listSource: "sqlite" | "photokit" = "sqlite";
+  if (!targetIds.length) {
+    try {
+      const pk = await photosChannel.listUntrashedPhotoKit({
+        udid,
+        limit: 500,
+        terminateAfter: true,
+      });
+      if (pk.ok && pk.assets.length) {
+        listSource = "photokit";
+        targetIds = pk.assets.map((a) => a.localIdentifier).filter(Boolean);
+      }
+    } catch {
+      /* keep empty */
+    }
+  }
   let deleteResult: Record<string, unknown> = {
     ok: true,
     requested: 0,
@@ -546,11 +707,24 @@ export async function photosClear(opts: {
       });
     }
   }
-  // verify
+  // verify — sqlite first; PhotoKit if we deleted via PhotoKit list or sqlite still empty
   let after = await afcListUntrashed(udid);
   for (let i = 0; i < 5 && after.count > 0; i++) {
     await sleep(1500);
     after = await afcListUntrashed(udid);
+  }
+  let afterPhotoKitCount = 0;
+  if (after.count === 0 && (listSource === "photokit" || targetIds.length > 0)) {
+    try {
+      const pkAfter = await photosChannel.listUntrashedPhotoKit({
+        udid,
+        limit: 500,
+        terminateAfter: true,
+      });
+      afterPhotoKitCount = pkAfter.ok ? pkAfter.count : 0;
+    } catch {
+      afterPhotoKitCount = 0;
+    }
   }
   let dcimCleanup: unknown;
   if (opts.clearDcim !== false) {
@@ -563,13 +737,14 @@ export async function photosClear(opts: {
       };
     }
   }
-  const cleared = after.count === 0;
+  const cleared = after.count === 0 && afterPhotoKitCount === 0;
   return {
     ok: cleared,
     stage: "verify" as const,
-    beforeCount: before.count,
-    afterCount: after.count,
-    targets: before.assets,
+    beforeCount: Math.max(before.count, targetIds.length),
+    afterCount: Math.max(after.count, afterPhotoKitCount),
+    listSource,
+    targets: targetIds,
     remaining: after.assets,
     deleteResult,
     dcimCleanup,

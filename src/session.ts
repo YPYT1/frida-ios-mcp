@@ -386,7 +386,8 @@ class SessionStore {
     const r = await closeLiveSession(live, closeTimeoutMs(), {
       killOnTimeout: true,
     });
-    if (r.timedOut) this.orphanFridaOpPossible = true;
+    // Kill on timeout already removed the orphan pid — do not force AI through force_unlock.
+    if (r.timedOut && !r.killed) this.orphanFridaOpPossible = true;
     return { closeTimedOut: r.timedOut, killed: r.killed };
   }
 
@@ -737,15 +738,18 @@ class SessionStore {
     springboardKept?: boolean;
     hint?: string;
     closeTimedOut?: boolean;
+    orphanKilled?: boolean;
   }> {
     const closeSb = opts.closeSpringBoard !== false;
     this.closeInFlight = { keepSb: !closeSb };
     let closeTimedOut = false;
+    let orphanKilled = false;
     try {
       await this.appLock.run(
         async () => {
           const r = await this.detachAppSessionUnlocked();
           closeTimedOut = r.closeTimedOut;
+          orphanKilled = !!r.killed;
         },
         {
           waitTimeoutMs: lockWaitTimeoutMs(),
@@ -763,7 +767,10 @@ class SessionStore {
           springboardClosed: true,
           springboardAlive: false,
           closeTimedOut: closeTimedOut || undefined,
-          hint: "App and SpringBoard sessions closed.",
+          orphanKilled: orphanKilled || undefined,
+          hint: orphanKilled
+            ? "App close timed out; orphan pid killed. Safe to session_open."
+            : "App and SpringBoard sessions closed.",
         };
       }
       this.sbKeepIntentional = !!this.sbLive?.alive;
@@ -773,6 +780,7 @@ class SessionStore {
         springboardAlive: !!this.sbLive?.alive,
         springboardKept: this.sbKeepIntentional,
         closeTimedOut: closeTimedOut || undefined,
+        orphanKilled: orphanKilled || undefined,
         hint: this.sbKeepIntentional
           ? "SpringBoard kept intentionally; call sb_close when done."
           : "App closed; SpringBoard was not attached.",
