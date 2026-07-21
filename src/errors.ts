@@ -318,12 +318,13 @@ export const PROBE_HELP = {
   },
   typing: {
     steps: [
-      "1) On Feed, tap search entry (region text varies: 搜尋 / 搜索 / Search — not 首頁/好友/nav)",
+      "1) On Feed, tap the search icon (top-right magnifier) — NOT the later submit label 搜尋",
       "2) wait { ms: 1500-2500 }",
-      '3) screen_snapshot — only top wide search-bar should be [input]; hot-search chips must NOT be [input]',
-      "4) smart_type_text({ text, ref of search-bar }) — AWESearchBar may canInsertText=false but still types",
-      "5) If NOT_INPUT: switch ref; never smart_type 好友/熱門搜尋 chips / nav chrome",
-      "6) Fallback: tap search bar coords → type_text (innerInsertText)",
+      "3) screen_snapshot — only the wide search-bar should be [input]; 搜尋/Search submit + hot chips must NOT be [input]",
+      "4) smart_type_text({ text, ref of wide [input] bar }) — AWESearchBar may canInsertText=false but still types",
+      "5) tap(ref) on narrow 搜尋/搜索/Search to submit the query",
+      "6) If NOT_INPUT: never smart_type 搜尋 submit / 好友 / 熱門搜尋 chips / nav chrome",
+      "7) Fallback: tap search-bar coords → type_text → tap 搜尋 submit",
     ],
     note: "Device must be past safety/login walls; real search-box typing needs a live device — no guaranteed path on locked accounts.",
   },

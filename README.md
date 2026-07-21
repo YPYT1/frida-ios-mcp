@@ -23,56 +23,58 @@ Independent of `fleetcontrol` (agent JS copied under `agent/`).
 
 Mismatch between host `frida` and phone `frida-server` → inject / `session_open` fails.
 
-## Device prerequisites（手机必须先具备）
+## Device prerequisites
 
-本 MCP **只适用于已越狱的 iPhone**。未越狱、未跑 `frida-server` 时，`device_list` 可能仍能看到 USB，但 **无法注入 / 无法触摸 / 无法读 UI**。
+This MCP targets **jailbroken iPhones only**. Without a jailbreak and a running `frida-server`, `device_list` may still show USB, but **inject / touch / UI text collection will fail**.
 
-### 1. 越狱环境（已验证方向）
+### 1. Supported jailbreak stacks
 
-| 环境 | 说明 |
-|------|------|
-| **多巴胺 (Dopamine)** | 常用；可配合 RootHide。本仓库默认 **spawn-only** 路径就是为这类环境准备的 |
-| **水滴 / Serotonin 系** | 同样需要设备上常驻或手动启动匹配版本的 `frida-server` |
-| **RootHide** | 推荐开：降低 TikTok 等对注入痕迹的风控；**不要**指望 `attach` 已运行进程（触摸常 `_touchesEvent=null`） |
+| Stack | Notes |
+|-------|--------|
+| **Dopamine** | Common; works well with RootHide. This repo’s default **spawn-only** path is built for this class of devices. |
+| **Waterfall / Serotonin-family** | Same requirement: a matching `frida-server` must run on the phone (daemon or manual start). |
+| **RootHide** | Recommended for TikTok-like apps (reduces inject fingerprints). Do **not** rely on `attach` to an already-running app process (`_touchesEvent` often stays null). |
 
-不支持：未越狱设备、仅开发者模式、仅 `pymobiledevice3` 无 Frida、远程 TCP Frida（当前 MVP 未做）。
+**Not supported:** stock (non-jailbroken) devices, Developer Mode alone, `pymobiledevice3` without Frida, or remote TCP Frida (USB-only MVP).
 
-### 2. 手机上必须运行 `frida-server`
+### 2. `frida-server` must be running on the phone
 
-1. 从 [Frida releases](https://github.com/frida/frida/releases) 下载与电脑端 **同一大版本** 的 `frida-server`（例：电脑 `frida@17.16.x` → 手机也用 17.x）。
-2. 推到设备并赋予执行权限（路径因越狱不同，常见 `/var/jb/usr/sbin/frida-server` 或 `/usr/sbin/frida-server`）。
-3. **以 root 启动并保持运行**，例如：
+1. Download `frida-server` from [Frida releases](https://github.com/frida/frida/releases) with the **same major** as the host npm `frida` package (e.g. host `frida@17.16.x` → device `frida-server` 17.x).
+2. Push it to the device and `chmod +x` (paths vary by jailbreak; common: `/var/jb/usr/sbin/frida-server` or `/usr/sbin/frida-server`).
+3. Start it as **root** and keep it running, e.g.:
 
 ```bash
-# 在手机终端 / SSH（示例，按你的实际路径改）
+# On-device SSH / terminal (adjust path for your jailbreak)
 sudo frida-server -D
-# 或前台调试：
+# or foreground for debugging:
 sudo frida-server
 ```
 
-4. PC 侧自检：
+4. Verify from the PC:
 
 ```bash
 pnpm cli call device_list
-# 或
+# or
 npx frida-ps -U
 ```
 
-能列出 USB 设备 / 进程，再开 MCP。`frida-server` 一停，后续 `session_open` 会失败或挂死。
+Only then start the MCP. If `frida-server` stops, later `session_open` calls will fail or hang.
 
-### 3. 电脑侧依赖
+### 3. Host machine
 
-- Node ≥ 22，本仓库 `pnpm install && pnpm build`
-- USB 数据线直连（信任电脑）
-- 相册导入另需：装有 `pymobiledevice3` 的 Python，并用 `FRIDA_MCP_PYTHON` 指到该解释器
+- Node.js ≥ 22; `pnpm install && pnpm build` in this repo
+- USB cable + trusted computer
+- For Photos import: Python with `pymobiledevice3`, pointed to by `FRIDA_MCP_PYTHON`
 
-### 4. TikTok / 触摸铁律
+### 4. TikTok / touch rules
 
-| 做法 | 结果 |
-|------|------|
-| `session_open`（默认 spawn：杀进程 → 挂起注入 → resume） | 触摸可靠 |
-| `attach` 已在前台的 TikTok | **不可靠**（默认禁止；`FRIDA_MCP_ALLOW_ATTACH=1` 仅逃生） |
-| 启动后立刻 `dump_tree` / Accessibility 爬树 | 易触发反调试；本 MCP 用安全文字收集 |
+| Approach | Result |
+|----------|--------|
+| `session_open` (default spawn: kill → inject while suspended → resume) | Touch reliable |
+| `attach` to already-foreground TikTok | **Unreliable** (blocked by default; `FRIDA_MCP_ALLOW_ATTACH=1` escape hatch only) |
+| Immediate Accessibility `dump_tree` after launch | Triggers anti-debug; this MCP uses safe text collection instead |
+
+**Search UI tip:** the top **wide** field is the text input (`[input]`). The narrow **搜尋 / 搜索 / Search** label on the right is a **submit button** (tap after typing) — never `smart_type_text` it.
 
 ### Spawn-only (this device stack)
 
@@ -209,8 +211,9 @@ pnpm cli close
 - `summaryOnly: true` for host counts only  
 - `redact:false` / `includeDataUrls` / `includeBinaryBodies` only on trusted local machines — never paste raw dumps into issues/PRs.
 
-**Typing (real input path):** Feed → tap **search** → `wait` → `screen_snapshot({ search: "Search|Cancel|搜尋|搜索|取消" })` → `smart_type_text` on the **input box** ref (not a nav label).  
-Nav tabs / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`; do not retry those refs.
+**Typing (real input path):** Feed → tap **magnifying-glass / search entry** (top-right icon, not the later submit label) → `wait` → `screen_snapshot` → `smart_type_text` on the **wide `[input]`** search bar (placeholder or typed text) → then `tap` the narrow **搜尋 / 搜索 / Search** **submit button** to run the query.  
+Never `smart_type_text` on nav tabs or on the submit **搜尋** button itself.  
+Nav / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`.
 
 **SB test alert:** `sb_alert_trigger` → `sb_alert_list` (`hasAlert`) → single `sb_alert_dismiss` (post-settle `cleared`) or stacked `sb_alert_dismiss({ all: true })`; if `needsRetry` re-list / retry `all`.
 

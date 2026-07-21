@@ -54,19 +54,28 @@ describe("snapshot likelyInput", () => {
           className: "UILabel",
         },
         {
-          codes: [..."搜尋"].map((c) => c.charCodeAt(0)),
+          // Wide bar placeholder — not the submit button「搜尋」
+          codes: [..."Search here"].map((c) => c.charCodeAt(0)),
           frame: { x: 40, y: 100, w: 300, h: 36, cx: 190, cy: 118 },
           className: "UITextField",
+        },
+        {
+          // Submit button — never [input]
+          codes: [..."搜尋"].map((c) => c.charCodeAt(0)),
+          frame: { x: 368, y: 34, w: 30, h: 17, cx: 383, cy: 42 },
+          className: "UILabel",
         },
       ],
       { width: 414, height: 736 },
     );
     const input = table.nodes.find((n) => n.likelyInput);
     assert.ok(input);
-    assert.match(input.text, /搜尋/);
+    assert.match(input.text, /Search here/);
+    const submit = table.nodes.find((n) => n.text === "搜尋");
+    assert.equal(submit?.likelyInput, undefined);
     const text = formatSnapshot(table, { limit: 5 });
     assert.match(text, /\[input\]/);
-    assert.ok(text.indexOf("搜尋") < text.indexOf("首頁"));
+    assert.ok(text.indexOf("Search here") < text.indexOf("首頁"));
   });
 
   it("does not mark hot-search chips or narrow 搜尋 button as input", () => {

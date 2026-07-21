@@ -114,11 +114,8 @@ function isSuggestionChrome(frame: Frame): boolean {
 function isLikelyInputText(text: string, frame?: Frame): boolean {
   const t = text.trim();
   if (!t || t.length > 80) return false;
-  // Lone "搜尋/Search" button (narrow) is NOT the field
-  if (/^(搜尋|搜索|Search|検索)$/i.test(t)) {
-    if (frame && frame.w > 0 && frame.w < 80) return false;
-    return true;
-  }
+  // Lone「搜尋/Search」is the submit button after typing — never the field
+  if (/^(搜尋|搜索|Search|検索)$/i.test(t)) return false;
   if (
     /^(輸入|输入|Type|Write a|Say something|有什麼想說|说点什么|Search here|Find user)/i.test(
       t,
@@ -137,18 +134,21 @@ function guessLikelyInput(
 ): boolean {
   // Geometry first — ignore misleading TikTok cell class names
   if (isSuggestionChrome(frame)) return false;
+  // Submit button text must win over SearchField-ish class names
+  if (/^(搜尋|搜索|Search|検索)$/i.test(text.trim())) return false;
 
   if (isLikelyInputClass(className)) return true;
   if (isLikelyInputText(text, frame)) return true;
 
-  // Top / full-width search-ish placeholder
+  // Top / full-width search-ish placeholder (not the submit button)
   if (
     frame.w >= 160 &&
     frame.h >= 28 &&
     frame.h <= 56 &&
     text.trim().length > 0 &&
     text.trim().length <= 48 &&
-    /^(搜|Search|search|輸入|输入|Type|検索)/i.test(text.trim())
+    /^(搜|Search|search|輸入|输入|Type|検索)/i.test(text.trim()) &&
+    !/^(搜尋|搜索|Search|検索)$/i.test(text.trim())
   ) {
     return true;
   }
