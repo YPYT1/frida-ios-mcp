@@ -271,17 +271,20 @@ export const PROBE_HELP = {
     "session_open { bundleId, withSpringBoard?: true }",
     'TikTok: wait_until_texts({ preset: "tiktok_feed", timeoutMs: 15000 })  // multi-locale; not one language',
     "screen_snapshot { onScreenOnly: true, limit: 40 }  // prefer [input] refs for typing",
+    "optional: screen_shot when texts sparse (pixels only — still need snapshot for refs)",
     "tap | swipe | smart_type_text  // resnapshot defaults true; SERIAL on app channel",
     "screen_snapshot if resnapshot=false",
   ],
   prefer: {
     type: "smart_type_text on [input] refs; type_text only if already focused",
     read: "screen_snapshot(onScreenOnly=true, limit=40, search=optional)",
+    visual:
+      "screen_shot for layout when collectTexts is sparse — lockdown pixels, not Accessibility",
     land: 'wait_until_texts({ preset: "tiktok_feed" }) after TikTok open — never hardcode TW/JP/EN alone',
     stuck:
-      "session_status (openInFlight/appLockBusy/refsValid) → session_force_unlock → one session_open",
+      "session_status (orphanFridaOpPossible/openInFlight/appLockBusy) → session_force_unlock (kills orphan pid) → ONE session_open",
     system_alert:
-      "sb_alert_trigger (force default false) → sb_alert_list (preferDismissAll) → sb_alert_dismiss({all:true}) when unsure — never parallel tap+dismiss → app screen_snapshot",
+      "sb_alert_list → sb_alert_dismiss({all:true}) when unsure — never parallel tap+dismiss → app screen_snapshot",
     dead_session: "session_respawn → wait_until_texts({preset:\"tiktok_feed\"}) / wait → screen_snapshot (login may reset)",
     media:
       "photos_import_file({localPath, mediaType:image|video}) → photos_list → photos_clear; pin FRIDA_MCP_PYTHON; video: avoid parallel session_open other apps",
@@ -308,6 +311,8 @@ export const PROBE_HELP = {
         'env: { "FRIDA_MCP_PYTHON": "C:\\\\Users\\\\You\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe" }',
       windows_cli:
         "set FRIDA_MCP_PYTHON=C:\\Users\\You\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      FRIDA_MCP_TOOLS:
+        "all (default) | core — core hides net/photos/dual extras from tool list",
     },
     note: "Delete = Recently Deleted (ZTRASHEDSTATE=1). Do not write Photos.sqlite or TCC.db. No auto pip install. needsRetry means re-list — not silent success without asset.",
   },
@@ -315,10 +320,10 @@ export const PROBE_HELP = {
     steps: [
       "1) On Feed, tap search entry (region text varies: 搜尋 / 搜索 / Search — not 首頁/好友/nav)",
       "2) wait { ms: 1500-2500 }",
-      '3) screen_snapshot({ search: "搜尋|搜索|Search|取消|Cancel" }) — pick INPUT box ref, not nav labels',
-      "4) smart_type_text({ text: \"hello\", ref }) — retryOnFail default false",
+      '3) screen_snapshot — pick wide search-bar [input] (placeholder), NOT hot-search chips / narrow「搜尋」button',
+      "4) smart_type_text({ text, ref }) — TikTok AWESearchBar may show canInsertText=false but still types",
       "5) If NOT_INPUT: switch ref; never retry-tap 有什麼好事/有什麼想法/發佈 chips or nav chrome",
-      "6) Optional: first_responder — need canInsertText:true before type_text",
+      "6) Fallback: tap search bar → type_text (innerInsertText) when smart_type is unsure",
     ],
     note: "Device must be past safety/login walls; real search-box typing needs a live device — no guaranteed path on locked accounts.",
   },
@@ -326,6 +331,9 @@ export const PROBE_HELP = {
     "rpc_call / dump_modal / set_text_at_point — DEBUG only (set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1)",
     "parallel app acts (tap+swipe together) — engine serializes but still wasteful",
     "human_type alias — use type_text",
+    "session_open while orphanFridaOpPossible=true — force_unlock first",
+    "using screen_shot refs for tap — pixels have no refs; always screen_snapshot",
+    "swipe duration=280 meaning seconds — use durationMs:280 (or duration≤10 as seconds)",
   ],
   defaults: {
     session_mode: "spawn-only on this stack",
@@ -335,20 +343,23 @@ export const PROBE_HELP = {
     type_perCharDelayMs: 90,
     dual_parallel: true,
     net_dump: "redact + drop data: URLs + fold binary bodies",
+    tools_mode: "FRIDA_MCP_TOOLS=all|core",
   },
   dual: {
     model: "App session (live) + SpringBoard session (sbLive) held together",
     locks:
       "appLock serializes ALL app acts; sbLock separate — App+SB concurrent OK. " +
       "session_open holds the lock with holdTimeout (open+close budget, ~70s default) so hung Frida detach/spawn cannot pin the lock forever. " +
-      "closeLiveSession soft-times out (FRIDA_MCP_CLOSE_TIMEOUT_MS, default 5s). " +
+      "closeLiveSession soft-times out (FRIDA_MCP_CLOSE_TIMEOUT_MS, default 5s); app close timeout also best-effort kills app pid. " +
+      "Hold timeout / SESSION_OPEN_TIMEOUT auto-kills inFlightPid/lastAppPid and sets orphanFridaOpPossible. " +
       "Lock wait: FRIDA_MCP_LOCK_WAIT_MS (default 90s). Spawn: FRIDA_MCP_OPEN_TIMEOUT_MS (default 60s). " +
-      "If MCP looks half-dead (device_list OK but open hangs): session_status → session_force_unlock or restart MCP. " +
-      "Cursor cancel does NOT abort server-side Frida; hold timeout / force_unlock recovers.",
+      "If MCP looks half-dead: session_status → session_force_unlock (kills orphan) → ONE open. " +
+      "Cursor cancel does NOT abort server-side Frida.",
     open: "session_open({ withSpringBoard: true }) or sb_ensure",
     prove: "dual_ping",
     close: "session_close closes both by default; closeSpringBoard:false keeps SB intentionally",
-    recover: "session_force_unlock — resets appLock/sbLock + best-effort detach (orphanFridaOpPossible)",
+    recover:
+      "session_force_unlock — resets locks + detach + kill orphan pid; clears orphanFridaOpPossible",
     photos:
       "photosLock side channel (Photos.app) independent of App/SB; photos_* does not destroy TikTok session",
   },

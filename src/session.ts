@@ -1,8 +1,8 @@
 import {
+  bestEffortKillPid,
   closeLiveSession,
   callRpc,
   closeTimeoutMs,
-  getDevice,
   lockWaitTimeoutMs,
   openAttachByProcessName,
   openAttachSession,
@@ -33,6 +33,7 @@ import { ProbeError } from "./errors.js";
 import { AsyncMutex, type MutexStatus } from "./mutex.js";
 import { photosChannel } from "./photos.js";
 import { resolveTextPreset } from "./presets.js";
+import { normalizeSwipeDuration } from "./swipe-duration.js";
 
 export type SessionStatus = {
   open: boolean;
@@ -76,6 +77,10 @@ export type SessionStatus = {
   orphanFridaOpPossible?: boolean;
   /** True while session_open critical section is running (even before lock acquire) */
   openInFlight?: boolean;
+  /** Last known app pid (live or in-flight spawn) — for orphan diagnostics */
+  lastAppPid?: number;
+  /** Pid reported during spawn before live session is assigned */
+  inFlightPid?: number;
 };
 
 export type SnapshotRequest = SnapshotFormatOpts & {
@@ -108,11 +113,17 @@ class SessionStore {
   private orphanFridaOpPossible = false;
   /** Guards overlapping session_open before lock is even acquired. */
   private openInFlight = false;
+  /** True while session_close is tearing down (status must not flicker half-closed). */
+  private closeInFlight: null | { keepSb: boolean } = null;
   /** True after a UI act until resnapshot replaces the ref table (status must not claim refsValid). */
   private uiDirty = false;
   /** Last app pid we spawned/attached — for orphan kill after force unlock */
   private lastAppPid: number | null = null;
   private lastAppUdid: string | undefined;
+  private lastAppBundleId: string | undefined;
+  /** Spawn returned pid but open not finished — prefer this for orphan kill */
+  private inFlightPid: number | null = null;
+  private inFlightUdid: string | undefined;
 
   private lockFields(): Pick<
     SessionStatus,
@@ -125,6 +136,8 @@ class SessionStore {
     | "sbLockBusyOp"
     | "orphanFridaOpPossible"
     | "openInFlight"
+    | "lastAppPid"
+    | "inFlightPid"
   > {
     const app = this.appLock.status();
     const sb = this.sbLock.status();
@@ -138,6 +151,8 @@ class SessionStore {
       sbLockBusyOp: sb.busyOp,
       orphanFridaOpPossible: this.orphanFridaOpPossible || undefined,
       openInFlight: this.openInFlight || undefined,
+      lastAppPid: this.live?.pid ?? this.lastAppPid ?? undefined,
+      inFlightPid: this.inFlightPid ?? undefined,
     };
   }
 
@@ -188,12 +203,52 @@ class SessionStore {
     const locks = this.lockFields();
     const refs = this.refsFields();
     const lockHint = this.lockHint(this.appLock.status());
+    if (this.closeInFlight) {
+      const keepSb = this.closeInFlight.keepSb;
+      const sbAlive = keepSb && !!this.sbLive?.alive;
+      return {
+        open: false,
+        alive: false,
+        injected: false,
+        ...refs,
+        hasSnapshot: false,
+        refsValid: false,
+        snapshotNodeCount: 0,
+        springboardAlive: sbAlive,
+        springboardPid: sbAlive ? this.sbLive!.pid : undefined,
+        springboardKept: keepSb || undefined,
+        dualParallel: true,
+        photosAlive: photosChannel.status().photosAlive,
+        ...locks,
+        hint: keepSb
+          ? "session_close in progress (app); SpringBoard will be kept."
+          : "session_close in progress — wait for it to finish.",
+        recovery: keepSb
+          ? ["wait for session_close", "sb_close when finished"]
+          : ["wait for session_close", "then session_open"],
+      };
+    }
     if (this.openInFlight && !lockHint.hint) {
       lockHint.hint =
         "session_open in flight — do not start another open; wait or session_force_unlock if stuck.";
       lockHint.recovery = [
         "wait for current session_open",
         "session_force_unlock if hung",
+        "or restart MCP process",
+      ];
+    }
+    if (this.orphanFridaOpPossible) {
+      const pidHint =
+        this.inFlightPid ?? this.live?.pid ?? this.lastAppPid ?? null;
+      lockHint.hint =
+        `ORPHAN FRIDA POSSIBLE` +
+        (pidHint ? ` (pid=${pidHint})` : "") +
+        ` — do NOT session_open again until session_force_unlock (kills orphan pid). ` +
+        (lockHint.hint ?? "");
+      lockHint.recovery = [
+        "session_force_unlock",
+        "session_status (confirm orphanFridaOpPossible cleared)",
+        "then ONE session_open",
         "or restart MCP process",
       ];
     }
@@ -316,7 +371,10 @@ class SessionStore {
   }
 
   /** Drop app session pointers then timed detach (caller must hold appLock or be forceUnlock). */
-  private async detachAppSessionUnlocked(): Promise<{ closeTimedOut: boolean }> {
+  private async detachAppSessionUnlocked(): Promise<{
+    closeTimedOut: boolean;
+    killed?: boolean;
+  }> {
     const live = this.live;
     this.live = null;
     this.snapshot = null;
@@ -324,18 +382,59 @@ class SessionStore {
     this.lastTreeText = null;
     this.lastSnapMeta = null;
     this.uiDirty = false;
-    const r = await closeLiveSession(live);
+    // App channel: on soft-close timeout, kill pid so next open does not fight an orphan.
+    const r = await closeLiveSession(live, closeTimeoutMs(), {
+      killOnTimeout: true,
+    });
     if (r.timedOut) this.orphanFridaOpPossible = true;
-    return { closeTimedOut: r.timedOut };
+    return { closeTimedOut: r.timedOut, killed: r.killed };
   }
 
   private async detachSbSessionUnlocked(): Promise<{ closeTimedOut: boolean }> {
     const sb = this.sbLive;
     this.sbLive = null;
     this.sbKeepIntentional = false;
+    // Never kill SpringBoard — detach only.
     const r = await closeLiveSession(sb);
     if (r.timedOut) this.orphanFridaOpPossible = true;
     return { closeTimedOut: r.timedOut };
+  }
+
+  /**
+   * Best-effort kill of in-flight / last app pid (does not touch SpringBoard).
+   * Used after hold timeout and by forceUnlock.
+   */
+  private async orphanKillBestEffort(): Promise<{
+    attempted: boolean;
+    pid?: number;
+    ok?: boolean;
+    error?: string;
+  }> {
+    const killPid = this.inFlightPid ?? this.live?.pid ?? this.lastAppPid;
+    const killUdid =
+      this.inFlightUdid ?? this.live?.udid ?? this.lastAppUdid;
+    if (!killPid) return { attempted: false };
+    const r = await bestEffortKillPid(killUdid, killPid);
+    this.inFlightPid = null;
+    this.inFlightUdid = undefined;
+    return {
+      attempted: true,
+      pid: killPid,
+      ok: r.ok,
+      error: r.error,
+    };
+  }
+
+  private noteInFlightPid(info: {
+    pid: number;
+    udid: string;
+    bundleId: string;
+  }): void {
+    this.inFlightPid = info.pid;
+    this.inFlightUdid = info.udid;
+    this.lastAppPid = info.pid;
+    this.lastAppUdid = info.udid;
+    this.lastAppBundleId = info.bundleId;
   }
 
   /** After UI act: optional auto screen_snapshot (default true). */
@@ -500,6 +599,7 @@ class SessionStore {
               udid: opts.udid,
               bundleId,
               timeoutMs: openMs,
+              onPid: (info) => this.noteInFlightPid(info),
               beforeResume: opts.captureNet
                 ? async (script) => {
                     net = await callRpc(script, "netEnable", [
@@ -540,6 +640,9 @@ class SessionStore {
 
           this.lastAppPid = this.live.pid;
           this.lastAppUdid = this.live.udid;
+          this.lastAppBundleId = this.live.bundleId;
+          this.inFlightPid = null;
+          this.inFlightUdid = undefined;
           this.live.onDead = (reason) => {
             this.markDead(reason);
             this.snapshot = null;
@@ -560,6 +663,14 @@ class SessionStore {
           e.code === "APP_LOCK_RESET")
       ) {
         this.orphanFridaOpPossible = true;
+        // Hold timeout releases the lock while spawn/detach may still run — kill known pid now.
+        const kill = await this.orphanKillBestEffort();
+        if (kill.attempted) {
+          console.error(
+            `[frida-mcp] orphan kill after ${e.code}: pid=${kill.pid} ok=${kill.ok}` +
+              (kill.error ? ` err=${kill.error}` : ""),
+          );
+        }
       }
       throw e;
     }
@@ -628,42 +739,47 @@ class SessionStore {
     closeTimedOut?: boolean;
   }> {
     const closeSb = opts.closeSpringBoard !== false;
+    this.closeInFlight = { keepSb: !closeSb };
     let closeTimedOut = false;
-    await this.appLock.run(
-      async () => {
-        const r = await this.detachAppSessionUnlocked();
-        closeTimedOut = r.closeTimedOut;
-      },
-      {
-        waitTimeoutMs: lockWaitTimeoutMs(),
-        holdTimeoutMs: closeTimeoutMs() + 2_000,
-        op: "session_close",
-      },
-    );
-    let springboardClosed = false;
-    if (closeSb) {
-      this.sbKeepIntentional = false;
-      await this.sbClose();
-      springboardClosed = true;
+    try {
+      await this.appLock.run(
+        async () => {
+          const r = await this.detachAppSessionUnlocked();
+          closeTimedOut = r.closeTimedOut;
+        },
+        {
+          waitTimeoutMs: lockWaitTimeoutMs(),
+          holdTimeoutMs: closeTimeoutMs() + 2_000,
+          op: "session_close",
+        },
+      );
+      let springboardClosed = false;
+      if (closeSb) {
+        this.sbKeepIntentional = false;
+        await this.sbClose();
+        springboardClosed = true;
+        return {
+          appClosed: true,
+          springboardClosed: true,
+          springboardAlive: false,
+          closeTimedOut: closeTimedOut || undefined,
+          hint: "App and SpringBoard sessions closed.",
+        };
+      }
+      this.sbKeepIntentional = !!this.sbLive?.alive;
       return {
         appClosed: true,
-        springboardClosed: true,
-        springboardAlive: false,
+        springboardClosed: false,
+        springboardAlive: !!this.sbLive?.alive,
+        springboardKept: this.sbKeepIntentional,
         closeTimedOut: closeTimedOut || undefined,
-        hint: "App and SpringBoard sessions closed.",
+        hint: this.sbKeepIntentional
+          ? "SpringBoard kept intentionally; call sb_close when done."
+          : "App closed; SpringBoard was not attached.",
       };
+    } finally {
+      this.closeInFlight = null;
     }
-    this.sbKeepIntentional = !!this.sbLive?.alive;
-    return {
-      appClosed: true,
-      springboardClosed: false,
-      springboardAlive: !!this.sbLive?.alive,
-      springboardKept: this.sbKeepIntentional,
-      closeTimedOut: closeTimedOut || undefined,
-      hint: this.sbKeepIntentional
-        ? "SpringBoard kept intentionally; call sb_close when done."
-        : "App closed; SpringBoard was not attached.",
-    };
   }
 
   async sbClose(): Promise<void> {
@@ -681,7 +797,7 @@ class SessionStore {
 
   /**
    * Emergency recovery when appLock is stuck (hung Frida / Cursor cancel).
-   * Does not wait on locks — force-resets then best-effort timed detach.
+   * Does not wait on locks — force-resets then best-effort timed detach + kill.
    */
   async forceUnlock(): Promise<{
     ok: true;
@@ -690,7 +806,7 @@ class SessionStore {
     appReset: ReturnType<AsyncMutex["forceReset"]>;
     sbReset: ReturnType<AsyncMutex["forceReset"]>;
     orphanKill?: { attempted: boolean; pid?: number; ok?: boolean; error?: string };
-    orphanFridaOpPossible: true;
+    orphanFridaOpPossible: boolean;
     hint: string;
   }> {
     const before = this.status();
@@ -699,30 +815,19 @@ class SessionStore {
     const sbReset = this.sbLock.forceReset();
     this.orphanFridaOpPossible = true;
 
-    const killPid = this.live?.pid ?? this.lastAppPid;
-    const killUdid = this.live?.udid ?? this.lastAppUdid;
+    // Kill first (while pids still known), then detach pointers.
+    const orphanKill = await this.orphanKillBestEffort();
 
     await this.detachAppSessionUnlocked();
     await this.detachSbSessionUnlocked();
 
-    let orphanKill: {
-      attempted: boolean;
-      pid?: number;
-      ok?: boolean;
-      error?: string;
-    } = { attempted: false };
-    if (killPid) {
-      orphanKill = { attempted: true, pid: killPid };
-      try {
-        const device = await getDevice(killUdid);
-        await device.kill(killPid);
-        orphanKill.ok = true;
-      } catch (e) {
-        orphanKill.ok = false;
-        orphanKill.error = e instanceof Error ? e.message : String(e);
-      }
-    }
     this.lastAppPid = null;
+    this.lastAppUdid = undefined;
+    this.lastAppBundleId = undefined;
+    this.inFlightPid = null;
+    this.inFlightUdid = undefined;
+    // After successful force path, clear orphan flag so AI may open again.
+    this.orphanFridaOpPossible = false;
 
     return {
       ok: true as const,
@@ -731,18 +836,26 @@ class SessionStore {
       appReset,
       sbReset,
       orphanKill,
-      orphanFridaOpPossible: true as const,
+      orphanFridaOpPossible: false,
       hint:
-        "Locks reset, sessions detached, best-effort kill of last app pid. If device acts oddly, restart MCP.",
+        "Locks reset, sessions detached, best-effort kill of in-flight/last app pid. Safe to session_open once. If device acts oddly, restart MCP.",
     };
   }
 
   /** Entire app-session op under one lock (serializes AI parallel tap/swipe). */
   private withAppOp<T>(fn: () => Promise<T>, op = "app_op"): Promise<T> {
+    // Cap hold so a bad swipe duration (or hung RPC) cannot pin appLock for minutes.
+    const holdTimeoutMs = Math.max(15_000, Number(process.env.FRIDA_MCP_APP_OP_HOLD_MS || 45_000));
     return this.appLock.run(fn, {
       waitTimeoutMs: lockWaitTimeoutMs(),
+      holdTimeoutMs,
       op,
     });
+  }
+
+  /** Mark refs unusable before a mutating act (parallel dual_ping/status must not claim refsValid). */
+  private beginUiAct(): void {
+    this.uiDirty = true;
   }
 
   async ping(): Promise<string> {
@@ -1049,13 +1162,30 @@ class SessionStore {
     return { text, table };
   }
 
-  screenSearch(query: string, useRegex = false): TextNode[] {
+  screenSearch(query: string, useRegex = false): {
+    nodes: TextNode[];
+    refsValid: boolean;
+    snapshotGeneration?: number;
+    warn?: string;
+  } {
+    if (this.uiDirty) {
+      throw new ProbeError(
+        "STALE_REF",
+        "UI act in progress (or just finished without valid resnapshot). Call screen_snapshot before screen_search.",
+        ["wait for tap/swipe to finish", "screen_snapshot", "then screen_search"],
+      );
+    }
     if (!this.snapshot) {
       throw new ProbeError("STALE_REF", "No snapshot yet. Call screen_snapshot first.", [
         "screen_snapshot",
       ]);
     }
-    return searchSnapshot(this.snapshot, query, useRegex);
+    const nodes = searchSnapshot(this.snapshot, query, useRegex);
+    return {
+      nodes,
+      refsValid: true,
+      snapshotGeneration: this.snapshot.generation,
+    };
   }
 
   resolveRef(ref: string): TextNode {
@@ -1125,6 +1255,7 @@ class SessionStore {
   }): Promise<Record<string, unknown>> {
     return this.withAppOp(async () => {
       const { x, y } = this.resolveTapPoint(opts);
+      this.beginUiAct();
       const result = await this.rpc("tap", [x, y]);
       const snapshot = await this.maybeResnapshot(opts.resnapshot);
       return this.actEnvelope(result, snapshot, { action: "tap", at: { x, y } });
@@ -1140,6 +1271,7 @@ class SessionStore {
   }): Promise<Record<string, unknown>> {
     return this.withAppOp(async () => {
       const { x, y } = this.resolveTapPoint(opts);
+      this.beginUiAct();
       const gapMs = opts.gapMs ?? 140;
       const result = await this.rpc("doubleTap", [x, y, gapMs]);
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
@@ -1356,11 +1488,19 @@ class SessionStore {
     y0?: number;
     x1?: number;
     y1?: number;
+    /** Agent seconds (≤10). Values >10 are treated as milliseconds. Prefer durationMs. */
     duration?: number;
+    /** Preferred: milliseconds (e.g. 280). Converted to agent seconds and clamped. */
+    durationMs?: number;
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
     return this.withAppOp(async () => {
-      const dur = opts.duration ?? 0.4;
+      this.beginUiAct();
+      const norm = normalizeSwipeDuration({
+        duration: opts.duration,
+        durationMs: opts.durationMs,
+      });
+      const dur = norm.seconds;
       let result: unknown;
       if (
         opts.x0 != null &&
@@ -1377,7 +1517,11 @@ class SessionStore {
         result = await this.rpc("swipe", [opts.direction, dur]);
       }
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 500);
-      return this.actEnvelope(result, snapshot, { action: "swipe" });
+      return this.actEnvelope(result, snapshot, {
+        action: "swipe",
+        durationSec: dur,
+        ...(norm.warn ? { durationWarn: norm.warn } : {}),
+      });
     });
   }
 
@@ -1407,6 +1551,7 @@ class SessionStore {
     resnapshot?: boolean;
   }): Promise<Record<string, unknown>> {
     return this.withAppOp(async () => {
+      this.beginUiAct();
       const text = opts.text;
       if (!text) throw new ProbeError("INVALID_ARGS", "text is required", ["type_text"]);
       const perCharDelayMs =
@@ -1477,9 +1622,31 @@ class SessionStore {
   }
 
   /**
+   * TikTok AWESearchBar often reports canInsertText=false while inputText still works
+   * via inner UISearchBarTextField (proven on device).
+   */
+  private frAllowsTyping(fr: unknown): boolean {
+    if (!fr || typeof fr !== "object") return false;
+    const o = fr as {
+      canInsertText?: boolean;
+      className?: string;
+      innerClassName?: string;
+    };
+    if (o.canInsertText === true) return true;
+    const cls = `${o.className ?? ""} ${o.innerClassName ?? ""}`.toLowerCase();
+    return (
+      cls.includes("searchbar") ||
+      cls.includes("uitextfield") ||
+      cls.includes("textfield") ||
+      cls.includes("uitextview") ||
+      cls.includes("textview")
+    );
+  }
+
+  /**
    * SmartTypeTextAction: tap → wait FR → human_pause → 拟人逐字.
    * Safer defaults: reject non-input labels; no aggressive retry on dead session;
-   * require canInsertText before typing when possible.
+   * SearchBar may type even when canInsertText=false.
    */
   async smartTypeText(opts: {
     text: string;
@@ -1540,11 +1707,13 @@ class SessionStore {
       }
       tapX = n.cx;
       tapY = n.cy;
-      tapMeta = { ref: n.ref, label: n.text };
+      tapMeta = { ref: n.ref, label: n.text, className: n.className };
     } else {
       tapX = opts.x!;
       tapY = opts.y!;
     }
+
+    this.beginUiAct();
 
     const tapTarget = async () => {
       await this.rpc("tap", [tapX, tapY]);
@@ -1554,19 +1723,15 @@ class SessionStore {
 
     const waitFirstResponder = async (): Promise<{
       fr: unknown;
-      canInsert: boolean;
+      canType: boolean;
     }> => {
       const deadline = Date.now() + waitKeyboardMs;
       let last: unknown = null;
       while (Date.now() < deadline) {
         try {
           last = await this.rpc("firstResponderInfo");
-          if (
-            last &&
-            typeof last === "object" &&
-            (last as { canInsertText?: boolean }).canInsertText
-          ) {
-            return { fr: last, canInsert: true };
+          if (this.frAllowsTyping(last)) {
+            return { fr: last, canType: true };
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -1576,7 +1741,7 @@ class SessionStore {
         }
         await new Promise((r) => setTimeout(r, 100));
       }
-      return { fr: last, canInsert: false };
+      return { fr: last, canType: this.frAllowsTyping(last) };
     };
 
     const tryType = async () => {
@@ -1601,6 +1766,7 @@ class SessionStore {
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 300).catch(
         () => undefined,
       );
+      void snapshot;
       throw e instanceof ProbeError
         ? e
         : new ProbeError(
@@ -1610,7 +1776,7 @@ class SessionStore {
           );
     }
 
-    let frWait: { fr: unknown; canInsert: boolean };
+    let frWait: { fr: unknown; canType: boolean };
     try {
       frWait = await waitFirstResponder();
     } catch (e) {
@@ -1623,11 +1789,11 @@ class SessionStore {
       );
     }
 
-    if (!frWait.canInsert) {
+    if (!frWait.canType) {
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
       return {
         ...this.actEnvelope(
-          { ok: false, reason: "no canInsertText after tap" },
+          { ok: false, reason: "no typable firstResponder after tap" },
           snapshot,
           {
             action: "SmartTypeTextAction",
@@ -1639,8 +1805,8 @@ class SessionStore {
             retried: false,
             recovery: [
               "ref is probably not an editable field",
-              "screen_snapshot search for 搜尋/Search/评论",
-              "first_responder before type_text",
+              "prefer wide search-bar placeholder [input], not hot-search chips",
+              "or tap search bar then type_text (SearchBar may report canInsertText=false)",
             ],
           },
         ),
@@ -1673,6 +1839,15 @@ class SessionStore {
           type_text: type1,
           retried: false,
           ok: type1.ok,
+          ...(type1.ok
+            ? {}
+            : {
+                error: type1.error,
+                recovery: [
+                  "try type_text after focusing search bar",
+                  "screen_snapshot for a better [input] ref",
+                ],
+              }),
         }),
       };
     }
@@ -1680,11 +1855,11 @@ class SessionStore {
     // Optional single retry only when explicitly enabled and session still alive
     const tap2 = await tapTarget();
     const fr2 = await waitFirstResponder();
-    if (!fr2.canInsert) {
+    if (!fr2.canType) {
       const snapshot = await this.maybeResnapshot(opts.resnapshot, 300);
       return {
         ...this.actEnvelope(
-          { ok: false, reason: "retry: still no canInsertText" },
+          { ok: false, reason: "retry: still no typable firstResponder" },
           snapshot,
           {
             action: "SmartTypeTextAction",
@@ -1740,9 +1915,13 @@ class SessionStore {
   }
 
   async pressHome(): Promise<unknown> {
-    // App backgrounds; keep session but clear snapshot
-    this.snapshot = null;
-    return this.rpc("pressHome");
+    return this.withAppOp(async () => {
+      this.beginUiAct();
+      // App backgrounds; keep session but clear snapshot
+      this.snapshot = null;
+      this.uiDirty = false;
+      return this.rpc("pressHome");
+    });
   }
 
   async netEnable(options: {

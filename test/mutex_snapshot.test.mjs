@@ -1,5 +1,5 @@
 /**
- * Node test runner (no deps): mutex hold/wait timeout + forceReset + snapshot likelyInput + presets.
+ * Node test runner (no deps): mutex hold/wait timeout + forceReset + snapshot likelyInput + presets + tool tiers.
  * Run: pnpm test
  */
 import { describe, it } from "node:test";
@@ -8,6 +8,12 @@ import { AsyncMutex } from "../dist/mutex.js";
 import { ProbeError } from "../dist/errors.js";
 import { buildTextSnapshot, formatSnapshot } from "../dist/snapshot.js";
 import { resolveTextPreset } from "../dist/presets.js";
+import {
+  annotateToolDesc,
+  shouldRegisterTool,
+  toolTier,
+  toolsMode,
+} from "../dist/tool-tiers.js";
 
 describe("AsyncMutex", () => {
   it("holdTimeout releases lock while fn still hung", async () => {
@@ -62,6 +68,35 @@ describe("snapshot likelyInput", () => {
     assert.match(text, /\[input\]/);
     assert.ok(text.indexOf("搜尋") < text.indexOf("首頁"));
   });
+
+  it("does not mark hot-search chips or narrow 搜尋 button as input", () => {
+    const table = buildTextSnapshot(
+      [
+        {
+          codes: [..."ヤマル 緊急入院 W杯決勝"].map((c) => c.charCodeAt(0)),
+          frame: { x: 40, y: 600, w: 184, h: 26, cx: 132, cy: 613 },
+          className: "TUXLabel",
+        },
+        {
+          codes: [..."搜尋"].map((c) => c.charCodeAt(0)),
+          frame: { x: 368, y: 34, w: 30, h: 17, cx: 383, cy: 42 },
+          className: "UILabel",
+        },
+        {
+          codes: [..."ワールドカップ注目選手"].map((c) => c.charCodeAt(0)),
+          frame: { x: 48, y: 24, w: 304, h: 36, cx: 200, cy: 42 },
+          className: "AWESearchBar",
+        },
+      ],
+      { width: 414, height: 736 },
+    );
+    const chip = table.nodes.find((n) => n.text.includes("ヤマル"));
+    const btn = table.nodes.find((n) => n.text === "搜尋");
+    const bar = table.nodes.find((n) => n.text.includes("ワールドカップ"));
+    assert.equal(chip?.likelyInput, undefined);
+    assert.equal(btn?.likelyInput, undefined);
+    assert.equal(bar?.likelyInput, true);
+  });
 });
 
 describe("presets", () => {
@@ -74,5 +109,53 @@ describe("presets", () => {
     assert.match(p.pattern, /For You/);
     assert.match(p.pattern, /首页/);
     assert.match(p.pattern, /홈/);
+  });
+});
+
+describe("tool tiers", () => {
+  it("classifies core vs advanced vs debug", () => {
+    assert.equal(toolTier("screen_snapshot"), "core");
+    assert.equal(toolTier("screen_shot"), "core");
+    assert.equal(toolTier("photos_list"), "advanced");
+    assert.equal(toolTier("rpc_call"), "debug");
+    assert.match(annotateToolDesc("net_dump", "x"), /^\[advanced\]/);
+  });
+
+  it("FRIDA_MCP_TOOLS=core hides advanced but keeps screen_shot", () => {
+    const prev = process.env.FRIDA_MCP_TOOLS;
+    process.env.FRIDA_MCP_TOOLS = "core";
+    try {
+      assert.equal(toolsMode(), "core");
+      assert.equal(shouldRegisterTool("tap"), true);
+      assert.equal(shouldRegisterTool("screen_shot"), true);
+      assert.equal(shouldRegisterTool("photos_list"), false);
+      assert.equal(shouldRegisterTool("net_dump"), false);
+      assert.equal(shouldRegisterTool("rpc_call"), false);
+    } finally {
+      if (prev === undefined) delete process.env.FRIDA_MCP_TOOLS;
+      else process.env.FRIDA_MCP_TOOLS = prev;
+    }
+  });
+});
+
+describe("swipe duration", () => {
+  it("treats 280 as ms not 280 seconds", async () => {
+    const { normalizeSwipeDuration } = await import("../dist/swipe-duration.js");
+    const n = normalizeSwipeDuration({ duration: 280 });
+    assert.ok(n.coercedFromMs);
+    assert.ok(Math.abs(n.seconds - 0.28) < 0.001);
+    assert.equal(n.clamped, false);
+  });
+
+  it("prefers durationMs and clamps huge values", async () => {
+    const { normalizeSwipeDuration } = await import("../dist/swipe-duration.js");
+    const a = normalizeSwipeDuration({ durationMs: 400 });
+    assert.ok(Math.abs(a.seconds - 0.4) < 0.001);
+    const b = normalizeSwipeDuration({ durationMs: 60_000 });
+    assert.equal(b.seconds, 2.5);
+    assert.equal(b.clamped, true);
+    const c = normalizeSwipeDuration({ duration: 0.5 });
+    assert.equal(c.coercedFromMs, false);
+    assert.equal(c.seconds, 0.5);
   });
 });

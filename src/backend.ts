@@ -10,7 +10,9 @@ import {
   photosImportFile,
   photosList,
 } from "./photos.js";
+import { takeScreenshot } from "./screenshot.js";
 import { sessionStore } from "./session.js";
+import { TOOL_TIERS_HELP, toolsMode } from "./tool-tiers.js";
 
 function textResult(text: string): { content: { type: "text"; text: string }[] } {
   return { content: [{ type: "text", text }] };
@@ -38,7 +40,13 @@ function boolParam(v: unknown, defaultVal: boolean): boolean {
 export async function handleMethod(
   method: string,
   params: Record<string, unknown> = {},
-): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
+): Promise<{
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  >;
+  isError?: boolean;
+}> {
   try {
     switch (method) {
       case "device_list": {
@@ -161,7 +169,41 @@ export async function handleMethod(
         return jsonResult(wf);
       }
       case "probe_help": {
-        return jsonResult(PROBE_HELP);
+        return jsonResult({
+          ...PROBE_HELP,
+          tools: { ...TOOL_TIERS_HELP, activeMode: toolsMode() },
+        });
+      }
+      case "screen_shot": {
+        const shot = await takeScreenshot({
+          udid: typeof params.udid === "string" ? params.udid : undefined,
+          quality:
+            params.quality != null ? Number(params.quality) : undefined,
+        });
+        // MCP image content for Cursor preview + compact JSON meta
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  ok: true,
+                  mimeType: shot.mimeType,
+                  bytes: shot.bytes,
+                  note: shot.note,
+                  next: "Use for visual context only — tap/type still needs screen_snapshot refs",
+                },
+                null,
+                2,
+              ),
+            },
+            {
+              type: "image" as const,
+              data: shot.base64,
+              mimeType: shot.mimeType,
+            },
+          ],
+        };
       }
       case "screen_snapshot": {
         const mode = params.mode as "texts" | "tree" | undefined;
@@ -190,13 +232,15 @@ export async function handleMethod(
           useRegex = true;
           autoRegex = true;
         }
-        const nodes = sessionStore.screenSearch(query, useRegex);
+        const searched = sessionStore.screenSearch(query, useRegex);
         return jsonResult({
-          count: nodes.length,
-          nodes,
-          best: nodes[0] ?? null,
+          count: searched.nodes.length,
+          nodes: searched.nodes,
+          best: searched.nodes[0] ?? null,
+          refsValid: searched.refsValid,
+          snapshotGeneration: searched.snapshotGeneration,
           searchMode: useRegex ? (autoRegex ? "regex(auto|)" : "regex") : "substring",
-          hint: "Default is substring. Use regex:true or a|b for alternation. Prefer screen_snapshot({ search }).",
+          hint: "Default is substring. Use regex:true or a|b for alternation. Prefer screen_snapshot({ search }). Do not search mid-swipe — wait for act or resnapshot.",
         });
       }
       case "tap": {
@@ -299,6 +343,8 @@ export async function handleMethod(
           x1: params.x1 != null ? Number(params.x1) : undefined,
           y1: params.y1 != null ? Number(params.y1) : undefined,
           duration: params.duration != null ? Number(params.duration) : undefined,
+          durationMs:
+            params.durationMs != null ? Number(params.durationMs) : undefined,
           resnapshot: boolParam(params.resnapshot, true),
         });
         return jsonResult(r);

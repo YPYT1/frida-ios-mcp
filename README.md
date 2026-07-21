@@ -51,8 +51,12 @@ kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject age
 | `FRIDA_MCP_OPEN_TIMEOUT_MS` | `60000` | spawn/attach/inject total timeout |
 | `FRIDA_MCP_CLOSE_TIMEOUT_MS` | `5000` | soft timeout for script unload/detach (won't pin the lock) |
 | `FRIDA_MCP_LOCK_WAIT_MS` | `90000` | max wait to acquire appLock/sbLock |
+| `FRIDA_MCP_TOOLS` | `all` | `core` = hide net/photos/dual extras from MCP tool list |
+| `FRIDA_MCP_ALLOW_DEBUG_TOOLS` | unset | `1` = register `rpc_call` / `dump_modal` / `set_text_at_point` |
 
-`session_open` also has a **hold timeout** (~open+close+5s): if Frida close/spawn hangs but the event loop is alive, the lock is released with `APP_LOCK_HOLD_TIMEOUT` instead of pinning forever.
+`session_open` also has a **hold timeout** (~open+close+5s): if Frida close/spawn hangs but the event loop is alive, the lock is released with `APP_LOCK_HOLD_TIMEOUT` instead of pinning forever. On hold/open timeout the server **best-effort kills** `inFlightPid` / last app pid and sets `orphanFridaOpPossible`. Soft-close timeout on the **app** channel also kills that pid (SpringBoard is never killed).
+
+**Stuck / orphan recovery:** `session_status` (look for `orphanFridaOpPossible` / `inFlightPid`) → `session_force_unlock` (kills orphan pid, clears flag) → **one** `session_open`. Do not immediately re-open while orphan is set.
 
 - **Held in parallel** — App + SB Frida scripts; Photos is a temporary third channel.
 - **RPCs concurrent** — separate locks; `dual_ping` / `Promise.all([app…, sb…])` run together.
@@ -238,8 +242,9 @@ FRIDA_MCP_MODE = "daemon"
 | `ping` | agent liveness |
 | `screen_window` | simplified `{width,height,x,y,cx,cy,className}` |
 | `screen_snapshot` / `screen_search` | texts refs are generation-scoped (`g3t8`); tree mode does not wipe texts refs |
-| `tap` / `swipe` / `press_home` / `wait` | act |
-| `probe_help` | Recommended probe loop (call first) |
+| `screen_shot` | lockdown pixel screenshot (pymobiledevice3); visual assist — **not** for tap refs |
+| `tap` / `swipe` / `press_home` / `wait` | act — **swipe prefer `durationMs`** (agent seconds; `duration>10` = ms) |
+| `probe_help` | Recommended probe loop + tool tiers (`tools.core` / `advanced`) |
 | `type_text` | Humanized per-char typing into focused field (`resnapshot` default true) |
 | `smart_type_text` | **Preferred:** tap → focus → humanized typing |
 | `clear_text` / `first_responder` / `human_pause` | focus / clear / step-gap pause |

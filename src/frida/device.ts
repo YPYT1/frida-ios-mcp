@@ -92,6 +92,20 @@ async function bestEffortCleanup(partial: {
   }
 }
 
+/** Best-effort kill by udid+pid (orphan recovery after hold/close timeout). */
+export async function bestEffortKillPid(
+  udid: string | undefined,
+  pid: number,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const device = await getDevice(udid);
+    await device.kill(pid);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function listDevices(): Promise<DeviceInfo[]> {
   const dm = await frida.getDeviceManager();
   const devices = await dm.enumerateDevices();
@@ -281,6 +295,8 @@ export async function openSpawnSession(opts: {
   beforeResume?: (script: frida.Script) => Promise<void>;
   /** Override FRIDA_MCP_OPEN_TIMEOUT_MS */
   timeoutMs?: number;
+  /** Fired as soon as spawn returns a pid (for orphan kill if open later times out). */
+  onPid?: (info: { pid: number; udid: string; bundleId: string }) => void;
 }): Promise<LiveSession> {
   const timeoutMs = opts.timeoutMs ?? openTimeoutMs();
   const cancelled = { value: false };
@@ -314,6 +330,11 @@ export async function openSpawnSession(opts: {
 
     const pid = await device.spawn([opts.bundleId]);
     partial.pid = pid;
+    try {
+      opts.onPid?.({ pid, udid, bundleId: opts.bundleId });
+    } catch {
+      /* ignore */
+    }
     if (cancelled.value) {
       await bestEffortCleanup(partial);
       throw new Error("session open cancelled");
@@ -463,7 +484,8 @@ export async function openAttachSession(opts: {
 export async function closeLiveSession(
   live: LiveSession | null,
   timeoutMs = closeTimeoutMs(),
-): Promise<{ timedOut: boolean }> {
+  opts: { killOnTimeout?: boolean } = {},
+): Promise<{ timedOut: boolean; killed?: boolean }> {
   if (!live) return { timedOut: false };
   live.alive = false;
   let timedOut = false;
@@ -492,12 +514,23 @@ export async function closeLiveSession(
   } catch {
     /* ignore */
   }
+  let killed = false;
   if (timedOut) {
     console.error(
-      `[frida-mcp] closeLiveSession timed out after ${timeoutMs}ms (bundle=${live.bundleId}, pid=${live.pid}) — abandoned detach`,
+      `[frida-mcp] closeLiveSession timed out after ${timeoutMs}ms (bundle=${live.bundleId}, pid=${live.pid}) — abandoned detach` +
+        (opts.killOnTimeout ? "; attempting kill" : ""),
     );
+    if (opts.killOnTimeout && live.pid) {
+      const r = await bestEffortKillPid(live.udid, live.pid);
+      killed = r.ok;
+      if (!r.ok) {
+        console.error(
+          `[frida-mcp] orphan kill failed pid=${live.pid}: ${r.error ?? "unknown"}`,
+        );
+      }
+    }
   }
-  return { timedOut };
+  return { timedOut, killed: killed || undefined };
 }
 
 /** Attach Frida to a process by name (e.g. SpringBoard). Not for TikTok apps. */

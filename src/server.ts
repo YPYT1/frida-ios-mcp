@@ -3,20 +3,43 @@ import { z } from "zod";
 import { handleMethod } from "./backend.js";
 import { daemonCall } from "./daemon-client.js";
 import { useDaemonMode } from "./protocol.js";
+import {
+  annotateToolDesc,
+  shouldRegisterTool,
+  toolsMode,
+} from "./tool-tiers.js";
 
 async function run(
   method: string,
   params: Record<string, unknown> = {},
-): Promise<{ content: { type: "text"; text: string }[] }> {
+): Promise<{
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  >;
+  isError?: boolean;
+}> {
   if (useDaemonMode()) {
     const result = await daemonCall(method, params);
     // daemon returns same shape
-    return result as { content: { type: "text"; text: string }[] };
+    return result as {
+      content: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string }
+      >;
+      isError?: boolean;
+    };
   }
   return handleMethod(method, params);
 }
 
-function toolResult(r: { content: { type: "text"; text: string }[] }) {
+function toolResult(r: {
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  >;
+  isError?: boolean;
+}) {
   return r;
 }
 
@@ -26,7 +49,26 @@ export function createMcpServer(): McpServer {
     version: "0.1.0",
   });
 
-  server.tool(
+  // Tiered registration: FRIDA_MCP_TOOLS=core hides advanced; debug needs ALLOW_DEBUG_TOOLS=1
+  const reg = ((
+    name: string,
+    description: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...rest: any[]
+  ) => {
+    if (!shouldRegisterTool(name)) return server;
+    return (server.tool as (...a: unknown[]) => unknown)(
+      name,
+      annotateToolDesc(name, description),
+      ...rest,
+    );
+  }) as typeof server.tool;
+
+  console.error(
+    `[frida-mcp] tools mode=${toolsMode()} (set FRIDA_MCP_TOOLS=core to hide net/photos/advanced)`,
+  );
+
+  reg(
     "device_list",
     "List Frida devices. Default USB-only. Need matching frida-server on phone (17.x with this package).",
     {
@@ -38,7 +80,7 @@ export function createMcpServer(): McpServer {
     async ({ usbOnly }) => toolResult(await run("device_list", { usbOnly })),
   );
 
-  server.tool(
+  reg(
     "app_list",
     "Enumerate apps: identifier, name, pid. Default userFacing=true filters noisy Apple services. Use runningOnly for live apps, query for name/id substring.",
     {
@@ -54,7 +96,7 @@ export function createMcpServer(): McpServer {
       toolResult(await run("app_list", { udid, runningOnly, userFacing, query })),
   );
 
-  server.tool(
+  reg(
     "session_open",
     [
       "Open long-lived Frida session (spawn-only on this stack).",
@@ -101,42 +143,42 @@ export function createMcpServer(): McpServer {
       ),
   );
 
-  server.tool(
+  reg(
     "dual_ping",
     "Parallel health: app ping + SpringBoard ping at the same time (proves dual inject + concurrent locks).",
     {},
     async () => toolResult(await run("dual_ping")),
   );
 
-  server.tool(
+  reg(
     "sb_ensure",
     "Attach SpringBoard now without listing alerts. Use to warm dual session; then app tools + sb_* can run in parallel.",
     {},
     async () => toolResult(await run("sb_ensure")),
   );
 
-  server.tool(
+  reg(
     "probe_help",
     "Recommended probe loop and which tools to prefer/avoid. Call first in a new session.",
     {},
     async () => toolResult(await run("probe_help")),
   );
 
-  server.tool(
+  reg(
     "session_status",
     "Session health: alive, refsValid/hasSnapshot, lastSnapshotGeneration, openInFlight, appLockBusy/waiters, recovery[].",
     {},
     async () => toolResult(await run("session_status")),
   );
 
-  server.tool(
+  reg(
     "session_respawn",
     "Force spawn+inject+resume for current bundle. Kills the app process. Prefer only when session is dead.",
     {},
     async () => toolResult(await run("session_respawn")),
   );
 
-  server.tool(
+  reg(
     "session_close",
     "Close app session. Default also closes SpringBoard. closeSpringBoard=false keeps SB intentionally (springboardKept).",
     {
@@ -149,28 +191,28 @@ export function createMcpServer(): McpServer {
       toolResult(await run("session_close", { closeSpringBoard })),
   );
 
-  server.tool(
+  reg(
     "session_force_unlock",
-    "Emergency: reset stuck appLock/sbLock and best-effort detach sessions. Use when device_list works but session_open/ping hang (Cursor cancel does not abort server Frida). May leave orphanFridaOpPossible.",
+    "Emergency: reset stuck locks, detach sessions, kill in-flight/last app pid. Use when orphanFridaOpPossible or open hangs. Then ONE session_open.",
     {},
     async () => toolResult(await run("session_force_unlock")),
   );
 
-  server.tool(
+  reg(
     "ping",
     "Agent liveness probe (returns pong). Do not use wrong RPC names as probes.",
     {},
     async () => toolResult(await run("ping")),
   );
 
-  server.tool(
+  reg(
     "screen_window",
     "Key window size: {width,height,x,y,cx,cy,className}. Safe on TikTok.",
     {},
     async () => toolResult(await run("screen_window")),
   );
 
-  server.tool(
+  reg(
     "screen_snapshot",
     [
       "Read screen → generation-scoped refs (g3t8). PRIMARY read tool.",
@@ -198,7 +240,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("screen_snapshot", args)),
   );
 
-  server.tool(
+  reg(
     "screen_search",
     "Filter last snapshot. query default SUBSTRING; regex:true or a|b for regex. Does not touch device.",
     {
@@ -208,7 +250,24 @@ export function createMcpServer(): McpServer {
     async ({ query, regex }) => toolResult(await run("screen_search", { query, regex })),
   );
 
-  server.tool(
+  reg(
+    "screen_shot",
+    [
+      "Pixel screenshot via lockdown ScreenshotService (pymobiledevice3) — NOT Accessibility, not Frida UI dump.",
+      "Use when texts are sparse / visual layout unclear. Still prefer screen_snapshot for tap refs.",
+      "Needs FRIDA_MCP_PYTHON + pymobiledevice3 (+ optional Pillow for JPEG). Returns image + meta.",
+    ].join(" "),
+    {
+      udid: z.string().optional(),
+      quality: z
+        .number()
+        .optional()
+        .describe("JPEG quality 1-95 when Pillow available, default 70"),
+    },
+    async ({ udid, quality }) => toolResult(await run("screen_shot", { udid, quality })),
+  );
+
+  reg(
     "process_list",
     "List device processes (pid, name). query is LITERAL substring only (not regex; SpringBoard ok, a|b is wrong).",
     {
@@ -220,7 +279,7 @@ export function createMcpServer(): McpServer {
       toolResult(await run("process_list", { udid, query, limit })),
   );
 
-  server.tool(
+  reg(
     "tap",
     [
       "Tap by ref (gNtM) or x,y. Default resnapshot=true returns new screen_snapshot in result.snapshot.",
@@ -239,7 +298,7 @@ export function createMcpServer(): McpServer {
       toolResult(await run("tap", { ref, x, y, resnapshot })),
   );
 
-  server.tool(
+  reg(
     "double_tap",
     "Double-tap (like) at ref or x,y. gapMs default 140. resnapshot default true.",
     {
@@ -253,22 +312,33 @@ export function createMcpServer(): McpServer {
       toolResult(await run("double_tap", { ref, x, y, gapMs, resnapshot })),
   );
 
-  server.tool(
+  reg(
     "swipe",
-    "Swipe direction or path. resnapshot default true (feed browse: set false then one snapshot).",
+    [
+      "Swipe direction or path. Prefer durationMs (e.g. 280). Agent uses seconds;",
+      "duration>10 is treated as ms (avoids 280→280s lock traps). Clamped ~0.15–2.5s.",
+      "resnapshot default true (feed browse: set false then one snapshot).",
+    ].join(" "),
     {
       direction: z.enum(["up", "down", "left", "right"]).optional(),
       x0: z.number().optional(),
       y0: z.number().optional(),
       x1: z.number().optional(),
       y1: z.number().optional(),
-      duration: z.number().optional(),
+      durationMs: z
+        .number()
+        .optional()
+        .describe("Preferred: milliseconds, e.g. 280 → ~0.28s"),
+      duration: z
+        .number()
+        .optional()
+        .describe("Seconds if ≤10; values >10 treated as ms. Prefer durationMs."),
       resnapshot: z.boolean().optional().describe("Default true"),
     },
     async (args) => toolResult(await run("swipe", args)),
   );
 
-  server.tool(
+  reg(
     "set_otp",
     "Fill TikTok OTP (TMVerificationCodeInputView / TUXPinField). Pass full code string e.g. 123456.",
     {
@@ -278,40 +348,38 @@ export function createMcpServer(): McpServer {
     async ({ code, source }) => toolResult(await run("set_otp", { code, source })),
   );
 
-  // Debug tools: set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 to register (reduces AI misuse)
-  if (process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS === "1") {
-    server.tool(
-      "set_text_at_point",
-      "[DEBUG] setText at point — NOT 拟人. Prefer type_text / smart_type_text.",
-      {
-        text: z.string(),
-        ref: z.string().optional(),
-        x: z.number().optional(),
-        y: z.number().optional(),
-      },
-      async ({ text, ref, x, y }) =>
-        toolResult(await run("set_text_at_point", { text, ref, x, y })),
-    );
+  // Debug tools: registered only when FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 (see tool-tiers)
+  reg(
+    "set_text_at_point",
+    "setText at point — NOT 拟人. Prefer type_text / smart_type_text.",
+    {
+      text: z.string(),
+      ref: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+    },
+    async ({ text, ref, x, y }) =>
+      toolResult(await run("set_text_at_point", { text, ref, x, y })),
+  );
 
-    server.tool(
-      "dump_modal",
-      "[DEBUG] dumpModalView. BLOCKED on TikTok. Daily probe: do not use.",
-      {},
-      async () => toolResult(await run("dump_modal")),
-    );
+  reg(
+    "dump_modal",
+    "dumpModalView. BLOCKED on TikTok. Daily probe: do not use.",
+    {},
+    async () => toolResult(await run("dump_modal")),
+  );
 
-    server.tool(
-      "rpc_call",
-      "[DEBUG] Whitelisted agent RPC. Prefer first-class tools + probe_help.",
-      {
-        name: z.string().describe("RPC name e.g. windowFrame"),
-        args: z.array(z.unknown()).optional(),
-      },
-      async ({ name, args }) => toolResult(await run("rpc_call", { name, args })),
-    );
-  }
+  reg(
+    "rpc_call",
+    "Whitelisted agent RPC. Prefer first-class tools + probe_help.",
+    {
+      name: z.string().describe("RPC name e.g. windowFrame"),
+      args: z.array(z.unknown()).optional(),
+    },
+    async ({ name, args }) => toolResult(await run("rpc_call", { name, args })),
+  );
 
-  server.tool(
+  reg(
     "sb_alert_list",
     [
       "List SpringBoard alerts. Live actionViewCount + actionViewCountRaw (raw may be higher; live can undercount stacks).",
@@ -322,7 +390,7 @@ export function createMcpServer(): McpServer {
     async () => toolResult(await run("sb_alert_list")),
   );
 
-  server.tool(
+  reg(
     "sb_alert_trigger",
     [
       "Create a test system alert (SBAlertItemTestRecipe). Default force=false: skip if alert already present (no stack).",
@@ -337,14 +405,14 @@ export function createMcpServer(): McpServer {
     async ({ force }) => toolResult(await run("sb_alert_trigger", { force })),
   );
 
-  server.tool(
+  reg(
     "sb_alert_tap",
     "Tap SpringBoard alert button by title. Then call app screen_snapshot. Do not parallel with dismiss.",
     { title: z.string().describe("Button title to match") },
     async ({ title }) => toolResult(await run("sb_alert_tap", { title })),
   );
 
-  server.tool(
+  reg(
     "sb_alert_dismiss",
     [
       "Dismiss SB alert. Default policy=deny. all=false: one layer after ~300ms settle (trust cleared; empty → cleared:true rounds:0).",
@@ -366,14 +434,14 @@ export function createMcpServer(): McpServer {
       toolResult(await run("sb_alert_dismiss", { policy, all, maxRounds })),
   );
 
-  server.tool(
+  reg(
     "sb_close",
     "Detach SpringBoard Frida session (app session_open stays open).",
     {},
     async () => toolResult(await run("sb_close")),
   );
 
-  server.tool(
+  reg(
     "type_text",
     [
       "拟人逐字 into ALREADY-FOCUSED field (TypeTextAction). Default perCharDelayMs=90 + jitter.",
@@ -388,12 +456,12 @@ export function createMcpServer(): McpServer {
       toolResult(await run("type_text", { text, perCharDelayMs, resnapshot })),
   );
 
-  server.tool(
+  reg(
     "smart_type_text",
     [
-      "PREFERRED typing: tap real input (ref|x,y) → wait canInsertText → 拟人逐字.",
-      "Rejects chrome/chips (e.g. 有什麼好事). retryOnFail default false (safer on TikTok).",
-      "resnapshot default true. Do not use on nav tabs.",
+      "PREFERRED typing: tap real input (ref|x,y) → wait typable FR → 拟人逐字.",
+      "Rejects chrome/chips (好友/有什麼好事). TikTok AWESearchBar may canInsertText=false but still types.",
+      "Prefer wide search-bar [input]; avoid hot-search chips. retryOnFail default false. resnapshot default true.",
     ].join(" "),
     {
       text: z.string(),
@@ -411,14 +479,14 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("smart_type_text", args)),
   );
 
-  server.tool(
+  reg(
     "clear_text",
     "Clear current firstResponder text field (setText empty).",
     {},
     async () => toolResult(await run("clear_text")),
   );
 
-  server.tool(
+  reg(
     "human_pause",
     "Random step gap sleep (fleetcontrol human_pause). Not typing delay — use between actions.",
     {
@@ -428,28 +496,28 @@ export function createMcpServer(): McpServer {
     async ({ minMs, maxMs }) => toolResult(await run("human_pause", { minMs, maxMs })),
   );
 
-  server.tool(
+  reg(
     "first_responder",
     "Current firstResponder info (className/frame/canInsertText). Check focus before type_text.",
     {},
     async () => toolResult(await run("first_responder")),
   );
 
-  server.tool(
+  reg(
     "press_home",
     "Background current app (suspend) so SpringBoard shows. Session may remain attached to previous app.",
     {},
     async () => toolResult(await run("press_home")),
   );
 
-  server.tool(
+  reg(
     "wait",
     "Sleep N milliseconds. Prefer wait_until_texts after TikTok session_open instead of blind wait.",
     { ms: z.number().describe("milliseconds") },
     async ({ ms }) => toolResult(await run("wait", { ms })),
   );
 
-  server.tool(
+  reg(
     "wait_until_texts",
     [
       "Poll screen_snapshot until on-screen text matches pattern or preset (or timeout).",
@@ -486,7 +554,7 @@ export function createMcpServer(): McpServer {
       ),
   );
 
-  server.tool(
+  reg(
     "net_enable",
     [
       "Start NSURLSession capture in current app (TLS plaintext after app decrypt).",
@@ -508,28 +576,28 @@ export function createMcpServer(): McpServer {
       toolResult(await run("net_enable", { maxBody, captureResponse, urlFilter })),
   );
 
-  server.tool(
+  reg(
     "net_disable",
     "Stop recording new network entries (buffer retained until net_clear).",
     {},
     async () => toolResult(await run("net_disable")),
   );
 
-  server.tool(
+  reg(
     "net_clear",
     "Clear captured network buffer.",
     {},
     async () => toolResult(await run("net_clear")),
   );
 
-  server.tool(
+  reg(
     "net_status",
     "Network capture status: enabled, hooksInstalled, count, options.",
     {},
     async () => toolResult(await run("net_status")),
   );
 
-  server.tool(
+  reg(
     "net_dump",
     [
       "Quiet HTTP dump. rawCount=buffer; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies/deduped=stats.",
@@ -560,7 +628,7 @@ export function createMcpServer(): McpServer {
   );
 
   // --- Photos album import/clear (side channel; requires Python + pymobiledevice3) ---
-  server.tool(
+  reg(
     "photos_ensure",
     "Spawn+resume Photos.app (com.apple.mobileslideshow), settle ~4s, inject photos agent. Does not close TikTok/app session. May steal foreground briefly.",
     {
@@ -570,7 +638,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("photos_ensure", args)),
   );
 
-  server.tool(
+  reg(
     "media_upload",
     "AFC upload PC file to /DCIM/100APPLE/{IMG|VID}_XXXX.ext. Needs Python + pymobiledevice3. stage=upload on failure.",
     {
@@ -581,7 +649,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("media_upload", args)),
   );
 
-  server.tool(
+  reg(
     "photos_import",
     "PhotoKit import already-on-device file (devicePath or remotePath under /DCIM). Host=Photos.app only. Returns localIdentifier.",
     {
@@ -597,7 +665,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("photos_import", args)),
   );
 
-  server.tool(
+  reg(
     "photos_import_file",
     [
       "One-shot: AFC upload + Photos ensure + PhotoKit import + optional sqlite verify. Preferred for AI.",
@@ -616,7 +684,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("photos_import_file", args)),
   );
 
-  server.tool(
+  reg(
     "photos_list",
     [
       "Pull Photos.sqlite via AFC; list untrashed assets (not Recently Deleted).",
@@ -635,7 +703,7 @@ export function createMcpServer(): McpServer {
     async (args) => toolResult(await run("photos_list", args)),
   );
 
-  server.tool(
+  reg(
     "photos_clear",
     "PhotoKit trash all untrashed image/video (Recently Deleted), verify count=0, optional DCIM source cleanup. needsRetry if leftover.",
     {

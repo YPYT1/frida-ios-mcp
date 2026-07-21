@@ -96,12 +96,33 @@ function isLikelyInputClass(className: string): boolean {
   );
 }
 
-/** Placeholder / search chrome — not nav chips like 有什麼好事 */
-function isLikelyInputText(text: string): boolean {
+/**
+ * Hot-search / suggestion chips (TikTok search page) — NOT editable fields.
+ * Real search bar is wide (~200+) or has SearchBar/TextField class.
+ */
+function isHotSearchChip(text: string, frame: Frame, className: string): boolean {
+  if (isLikelyInputClass(className)) return false;
+  const t = text.trim();
+  if (t.length < 6) return false;
+  // Chip row: short height, not full-width bar
+  if (frame.h > 0 && frame.h <= 34 && frame.w > 0 && frame.w < 280) {
+    // Explicit search chrome is handled separately; suggestions are free text
+    if (!/^(搜尋|搜索|Search|検索|Cancel|取消)$/i.test(t)) return true;
+  }
+  return false;
+}
+
+/** Placeholder / search chrome — not nav chips like 有什麼好事 / hot queries */
+function isLikelyInputText(text: string, frame?: Frame): boolean {
   const t = text.trim();
   if (!t || t.length > 80) return false;
+  // Lone "搜尋/Search" button (narrow) is NOT the field
+  if (/^(搜尋|搜索|Search|検索)$/i.test(t)) {
+    if (frame && frame.w > 0 && frame.w < 80) return false;
+    return true;
+  }
   if (
-    /^(搜尋|搜索|Search|検索|입력|輸入|输入|Type|Write a|Say something|有什麼想說|说点什么)/i.test(
+    /^(輸入|输入|Type|Write a|Say something|有什麼想說|说点什么|Search here|Find user)/i.test(
       t,
     )
   ) {
@@ -116,16 +137,17 @@ function guessLikelyInput(
   frame: Frame,
   className: string,
 ): boolean {
+  if (isHotSearchChip(text, frame, className)) return false;
   if (isLikelyInputClass(className)) return true;
-  if (isLikelyInputText(text)) return true;
-  // Wide short field with short label — weak signal only with empty-ish / hint text
+  if (isLikelyInputText(text, frame)) return true;
+  // Wide short bar + search-ish placeholder (real search field, not chip)
   if (
-    frame.w >= 120 &&
+    frame.w >= 160 &&
     frame.h >= 28 &&
     frame.h <= 56 &&
     text.trim().length > 0 &&
-    text.trim().length <= 40 &&
-    /搜|Search|search|輸入|输入|Type/i.test(text)
+    text.trim().length <= 48 &&
+    /^(搜|Search|search|輸入|输入|Type|検索)/i.test(text.trim())
   ) {
     return true;
   }
