@@ -311,6 +311,7 @@ FRIDA_MCP_MODE = "daemon"
 | `process_list` | device processes (pid/name) |
 | `sb_alert_trigger` / `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
 | `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession + TTNet/Cronet capture (TLS plaintext after app decrypt) |
+| `tiktok_im` / `tiktok_posts` / `tiktok_sign` | IM (dryRun send) / self posts via TTNet / MetaSec sign I/O (advanced) |
 
 Refs expire after `tap`/`swipe` and across snapshot generations. Off-screen / zero-size nodes are marked and rejected on `tap`.
 
@@ -340,19 +341,36 @@ Agent: `agent/text_input/comment.js` (same approach as fleetcontrol).
 session_open {
   bundleId,
   captureNet: true,
-  netOptions: { captureMode: "all", maxBody: 16384, captureResponse: true }
+  netOptions: { captureMode: "all", maxBody: 16384, captureResponse: true, signTrace: true }
 }
   → use app (Inbox / Profile)
   → net_dump({ redact:false, dedupe:false, query:"imapi|inbox|/im/|profile/self|security-argus", includeBinaryBodies:true, limit:100 })
+  → tiktok_sign({ action: "last" })   # recent sign headers (+ backtrace if signTrace)
 ```
 
 - **`captureMode`:** `nsurl` | `ttnet` | `all` (default).
+- **Signing model (general capability):** MCP does **not** reimplement offline `X-Gorgon` / `X-Argus`. Instead it uses **in-process TTNet** (`TTNetworkManager` JSON request) so the **App's MetaSec** signs, and `net_*` / `tiktok_sign` capture `x-security-argus` / `x-Tt-Token` / `x-metasec-*` I/O (+ optional `signTrace` backtrace).
 - **iOS sign headers (45.x):** `x-security-argus`, `x-Tt-Token`, `x-metasec-*`, ticket/device-guard — **classic `X-Gorgon` / `X-Argus` names are often absent** on this build.
-- **Responses:** `captureResponse:true` uses TTNet `onReadResponseData` + `setIsCompleted`. Do **not** hook `onURLFetchComplete` (kills script). Many JSON/IM payloads may still arrive empty via this path (protobuf/other channels); binary/CDN bodies usually populate.
+- **Responses:** `captureResponse:true` uses TTNet `onReadResponseData` + `setIsCompleted`. Do **not** hook `onURLFetchComplete` (kills script). Many JSON/IM payloads may still arrive empty via this path (protobuf/other channels); binary/CDN bodies usually populate. Prefer **ttnetRequest callback JSON** for posts/list APIs.
 - **DM / works URLs seen on device:** `imapi-*.tiktokv.com/v1/message/get_by_user`, `…/v2/message/get_by_user_init`, `tiktok/v1/im/inbox_data/get`, `aweme/v1/user/profile/self`, feed/post endpoints.
-- **Network-level DM reply:** not a raw HTTP replay — requests need live MetaSec signing (`x-security-argus`). Prefer in-app IM (`AWEIMSendMessageController`) or UI automation; external replay without signing will fail.
+- **IM send (`tiktok_im`):** `action: status | conversations | send_text | phone_status`. **`send_text` defaults `dryRun:true`** — constructs `AWEIMTextMessage` + `TIMOConversation` only; pass `dryRun:false` to call `sendMessage:conversation:`. Get `conversationId` from `conversations` or `net_dump query:imapi|inbox`.
+- **Posts (`tiktok_posts`):** self post list via TTNet to `aweme/v1/aweme/post/` (override `url`/`userId` if needed).
+- **Add Phone popup attribution (no dedicated tool):**
+  1. `session_open` with `captureNet` + reproduce the popup
+  2. `net_dump({ query: "passport/account|bind_phone|mobile", redact:false, dedupe:false })` — avoid bare `phone` (matches `iPhone` device_type noise)
+  3. `tiktok_im({ action: "phone_status" })` — on this build: `AWEUserService.sharedService` → `currentLoginUser`:
+     - `havePhoneNumber` / `isPhoneBinded` false + empty `bindPhone` ⇒ **account unbound** (not just a cosmetic prompt)
+     - `canShowThirdPartyPhoneBindingPopup` / `is3pBindPopupRequestShow` distinguish third-party bind UI vs mandatory add-phone
+  4. Boot traffic often includes `passport/account/info/v2` and `passport/token/beat/v2`
 - **RE dump tip:** `redact:false`, `dedupe:false`, `includeBinaryBodies:true`.
 
+### Advanced TikTok tools (not core)
+
+| Tool | Purpose |
+|------|---------|
+| `tiktok_im` | IM status / list / dryRun send / phone bind status |
+| `tiktok_posts` | Self works list (in-app signed TTNet) |
+| `tiktok_sign` | `last` sign headers or `enable_trace` |
 ## NSSM (only after device tools work)
 
 ```powershell

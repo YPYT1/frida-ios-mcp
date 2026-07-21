@@ -432,6 +432,8 @@ export async function handleMethod(
             typeof params.urlFilter === "string" ? params.urlFilter : undefined,
           captureMode:
             typeof params.captureMode === "string" ? params.captureMode : undefined,
+          signTrace:
+            params.signTrace != null ? Boolean(params.signTrace) : undefined,
         });
         return jsonResult(r);
       }
@@ -456,6 +458,35 @@ export async function handleMethod(
           includeDataUrls: Boolean(params.includeDataUrls),
           includeBinaryBodies: Boolean(params.includeBinaryBodies),
           dedupe: params.dedupe === false ? false : true,
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_im": {
+        const r = await sessionStore.tiktokIm({
+          action: typeof params.action === "string" ? params.action : "status",
+          conversationId:
+            typeof params.conversationId === "string"
+              ? params.conversationId
+              : undefined,
+          text: typeof params.text === "string" ? params.text : undefined,
+          dryRun: params.dryRun === false ? false : true,
+          limit: params.limit != null ? Number(params.limit) : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_posts": {
+        const r = await sessionStore.tiktokPosts({
+          count: params.count != null ? Number(params.count) : undefined,
+          cursor: params.cursor != null ? String(params.cursor) : undefined,
+          userId: typeof params.userId === "string" ? params.userId : undefined,
+          url: typeof params.url === "string" ? params.url : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_sign": {
+        const r = await sessionStore.tiktokSign({
+          action: typeof params.action === "string" ? params.action : "last",
+          limit: params.limit != null ? Number(params.limit) : undefined,
         });
         return jsonResult(r);
       }

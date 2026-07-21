@@ -492,6 +492,8 @@ class SessionStore {
       urlFilter?: string;
       /** nsurl | ttnet | all — TikTok business APIs need ttnet/all */
       captureMode?: string;
+      /** Attach module+offset backtrace on sign_header writes */
+      signTrace?: boolean;
     };
     /**
      * If true, attach SpringBoard in parallel with app open (dual inject ready).
@@ -2026,6 +2028,7 @@ class SessionStore {
     captureResponse?: boolean;
     urlFilter?: string;
     captureMode?: string;
+    signTrace?: boolean;
   } = {}): Promise<unknown> {
     return this.rpc("netEnable", [options]);
   }
@@ -2040,6 +2043,60 @@ class SessionStore {
 
   async netStatus(): Promise<unknown> {
     return this.rpc("netStatus");
+  }
+
+  async signLast(options: { limit?: number } = {}): Promise<unknown> {
+    return this.rpc("signLast", [options]);
+  }
+
+  async tiktokIm(options: {
+    action: string;
+    conversationId?: string;
+    text?: string;
+    dryRun?: boolean;
+    limit?: number;
+  }): Promise<unknown> {
+    const action = String(options.action || "status").toLowerCase();
+    if (action === "status") return this.rpc("imStatus");
+    if (action === "conversations") {
+      return this.rpc("imListConversations", [{ limit: options.limit }]);
+    }
+    if (action === "send_text") {
+      return this.rpc("imSendText", [
+        {
+          conversationId: options.conversationId,
+          text: options.text,
+          dryRun: options.dryRun !== false,
+        },
+      ]);
+    }
+    if (action === "phone_status") return this.rpc("userPhoneBindStatus");
+    throw new Error(
+      `tiktok_im unknown action "${options.action}". Use status|conversations|send_text|phone_status`,
+    );
+  }
+
+  async tiktokPosts(options: {
+    count?: number;
+    cursor?: string;
+    userId?: string;
+    url?: string;
+  } = {}): Promise<unknown> {
+    return this.rpc("postsListSelf", [options]);
+  }
+
+  async tiktokSign(options: {
+    action?: string;
+    limit?: number;
+  } = {}): Promise<unknown> {
+    const action = String(options.action || "last").toLowerCase();
+    if (action === "enable_trace") {
+      return this.rpc("netEnable", [{ signTrace: true, captureMode: "ttnet" }]);
+    }
+    if (action === "last") {
+      return this.rpc("signLast", [{ limit: options.limit }]);
+    }
+    throw new Error(`tiktok_sign unknown action "${options.action}". Use last|enable_trace`);
   }
 
   async netDump(

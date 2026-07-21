@@ -19,8 +19,16 @@ import { dumpModalView }                   from './handle_popup/handle_popup.js'
 import { findView, findViews, dumpTree, dumpLoginGate, windowFrame } from './shared_js/view_tree.js';
 import { collectTexts, collectTextsWithFrames, setTextAtPoint, findButtons, dumpAllViewStates } from './collect_labels.js';
 import { setOtpCode } from './otp_input/otp_input.js';
-import { netEnable, netDisable, netClear, netDump, netStatus } from './net_capture.js';
+import { netEnable, netDisable, netClear, netDump, netStatus, signLast } from './net_capture.js';
 import { sbAlertList, sbAlertTap, sbAlertDismiss, sbAlertTrigger } from './springboard/sb_alerts.js';
+import { ttnetRequest, ttnetStatus } from './ttnet_request.js';
+import {
+    imStatus,
+    imListConversations,
+    imSendText,
+    userPhoneBindStatus,
+} from './tiktok_im.js';
+import { postsListSelf } from './tiktok_posts.js';
 
 rpc.exports = {
     // --- 存活探针（MCP / 宿主勿用错误方法名当探针）---
@@ -66,6 +74,16 @@ rpc.exports = {
     netClear:   ()                       => netClear(),
     netDump:    (options)                => netDump(options || {}),
     netStatus:  ()                       => netStatus(),
+    signLast:   (options)                => signLast(options || {}),
+
+    // --- TTNet 代签请求 + TikTok IM / posts ---
+    ttnetStatus:  ()                     => ttnetStatus(),
+    ttnetRequest: (options)              => ttnetRequest(options || {}),
+    imStatus:     ()                     => imStatus(),
+    imListConversations: (options)       => imListConversations(options || {}),
+    imSendText:   (options)              => imSendText(options || {}),
+    userPhoneBindStatus: ()              => userPhoneBindStatus(),
+    postsListSelf: (options)             => postsListSelf(options || {}),
 
     // --- SpringBoard 系统弹窗（注入 SpringBoard 时用）---
     sbAlertList:    ()                   => sbAlertList(),

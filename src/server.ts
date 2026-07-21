@@ -131,6 +131,10 @@ export function createMcpServer(): McpServer {
             .enum(["nsurl", "ttnet", "all"])
             .optional()
             .describe("nsurl | ttnet | all (default all)"),
+          signTrace: z
+            .boolean()
+            .optional()
+            .describe("Backtrace on MetaSec sign_header writes"),
         })
         .optional(),
     },
@@ -580,8 +584,9 @@ export function createMcpServer(): McpServer {
     [
       "Start in-process HTTP capture. captureMode: nsurl | ttnet | all (default all).",
       "ttnet hooks TikTok TTHttpTaskChromium AFTER request filters (api.tiktokv.com + headers/sign fields).",
-      "captureResponse wraps NSURLSession only (unstable on TikTok if set at spawn — prefer request-only).",
-      "Each call RESETS opts. Typical RE: session_open({captureNet:true}) → use app → net_dump({redact:false,dedupe:false,query:\"tiktokv\"}).",
+      "signTrace:true attaches module+offset backtrace on sign_header writes (MetaSec RE).",
+      "captureResponse wraps TTNet onReadResponseData+setIsCompleted (stable). NSURLSession wrap skipped when TTHttpTaskChromium present.",
+      "Each call RESETS opts. Typical RE: session_open({captureNet:true, netOptions:{signTrace:true}}) → use app → net_dump / tiktok_sign.",
     ].join(" "),
     {
       maxBody: z.number().optional().describe("Max body preview bytes, default 4096"),
@@ -589,7 +594,7 @@ export function createMcpServer(): McpServer {
         .boolean()
         .optional()
         .describe(
-          "Capture response bodies. TTNet: onReadResponseData+setIsCompleted (+JSON correlate). NSURLSession: completion wrap. Default false.",
+          "Capture response bodies. TTNet: onReadResponseData+setIsCompleted. Default false.",
         ),
       urlFilter: z
         .string()
@@ -599,9 +604,21 @@ export function createMcpServer(): McpServer {
         .enum(["nsurl", "ttnet", "all"])
         .optional()
         .describe("nsurl | ttnet | all (default all)"),
+      signTrace: z
+        .boolean()
+        .optional()
+        .describe("Attach compact backtrace on MetaSec sign_header writes"),
     },
-    async ({ maxBody, captureResponse, urlFilter, captureMode }) =>
-      toolResult(await run("net_enable", { maxBody, captureResponse, urlFilter, captureMode })),
+    async ({ maxBody, captureResponse, urlFilter, captureMode, signTrace }) =>
+      toolResult(
+        await run("net_enable", {
+          maxBody,
+          captureResponse,
+          urlFilter,
+          captureMode,
+          signTrace,
+        }),
+      ),
   );
 
   reg(
@@ -628,9 +645,9 @@ export function createMcpServer(): McpServer {
   reg(
     "net_dump",
     [
-      "Quiet HTTP dump. Entries may include stack=nsurl|ttnet, signHeaders, query.",
+      "Quiet HTTP dump. Entries may include stack=nsurl|ttnet, signHeaders, query, backtrace (if signTrace).",
       "rawCount=buffer; returned(=count)=entries after filter. Default: redact, DROP data: URLs, FOLD binary, dedupe method+url.",
-      "RE tip: redact:false dedupe:false query:\"tiktokv\" or query:\"sign_header\". summaryOnly=host counts.",
+      "RE tip: redact:false dedupe:false query:\"tiktokv\" or query:\"sign_header\". Add Phone: query:\"phone|bind|mobile|passport|verify\".",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),
@@ -654,6 +671,63 @@ export function createMcpServer(): McpServer {
         .describe("Default true — keep first entry per method+url"),
     },
     async (args) => toolResult(await run("net_dump", args)),
+  );
+
+  reg(
+    "tiktok_im",
+    [
+      "In-process TikTok IM. action: status | conversations | send_text | phone_status.",
+      "send_text defaults dryRun:true (constructs message+conversation only). Pass dryRun:false to really send.",
+      "conversationId from conversations or net_dump query:imapi|inbox. phone_status = AWEUserModel bind flags vs Add Phone popup.",
+    ].join(" "),
+    {
+      action: z
+        .enum(["status", "conversations", "send_text", "phone_status"])
+        .describe("IM action"),
+      conversationId: z.string().optional().describe("Required for send_text"),
+      text: z.string().optional().describe("Message text for send_text"),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("Default true — do not call sendMessage unless false"),
+      limit: z.number().optional().describe("conversations limit, default 20"),
+    },
+    async (args) => toolResult(await run("tiktok_im", args)),
+  );
+
+  reg(
+    "tiktok_posts",
+    [
+      "List current user's posts via in-process TTNet (App MetaSec signs). Returns awemeId/desc/createTime/stats.",
+      "Override url/userId if path differs; calibrate with net_dump query:aweme/post.",
+    ].join(" "),
+    {
+      count: z.number().optional().describe("Page size, default 12"),
+      cursor: z.string().optional().describe("max_cursor, default 0"),
+      userId: z.string().optional().describe("Override user_id if auto-detect fails"),
+      url: z
+        .string()
+        .optional()
+        .describe("Override endpoint (default api.tiktokv.com/aweme/v1/aweme/post/)"),
+    },
+    async (args) => toolResult(await run("tiktok_posts", args)),
+  );
+
+  reg(
+    "tiktok_sign",
+    [
+      "MetaSec sign observability (NOT offline Argus recompute). action: last | enable_trace.",
+      "last → recent sign_header / signHeaders entries (x-security-argus, x-Tt-Token, …).",
+      "enable_trace → net_enable({signTrace:true, captureMode:ttnet}). Prefer session_open captureNet+signTrace.",
+    ].join(" "),
+    {
+      action: z
+        .enum(["last", "enable_trace"])
+        .optional()
+        .describe("Default last"),
+      limit: z.number().optional().describe("For action=last, default 20"),
+    },
+    async (args) => toolResult(await run("tiktok_sign", args)),
   );
 
   // --- Photos album import/clear (side channel; requires Python + pymobiledevice3) ---

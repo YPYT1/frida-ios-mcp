@@ -24,6 +24,7 @@ let opts = {
     captureResponse: false,
     urlFilter: '',
     captureMode: 'all',
+    signTrace: false,
 };
 let hooksInstalled = false;
 const hooked = [];
@@ -40,6 +41,27 @@ const recentTtnetReqs = [];
 
 const SIGN_HEADER_RE =
     /gorgon|argus|ladon|khronos|helios|medusa|metasec|security-argus|x-ss-stub|x-ss-req-ticket|x-tt-token|x-tt-dt|x-tt-multi|x-bd-kmsv|mstoken|x-vc-bdturing|x-ttnet-request|tt-request-time|ticket-guard|device-guard/i;
+
+/** Compact module+offset frames for MetaSec RE (signTrace). */
+function briefBacktrace(context, maxFrames) {
+    const n = Math.max(2, Math.min(24, Number(maxFrames) || 12));
+    try {
+        const frames = Thread.backtrace(context, Backtracer.ACCURATE).slice(0, n);
+        const out = [];
+        for (let i = 0; i < frames.length; i++) {
+            const addr = frames[i];
+            const mod = Process.findModuleByAddress(addr);
+            if (mod) {
+                out.push(mod.name + '+0x' + addr.sub(mod.base).toString(16));
+            } else {
+                out.push(addr.toString());
+            }
+        }
+        return out;
+    } catch (_e) {
+        return [];
+    }
+}
 
 function safeStr(v) {
     try {
@@ -539,7 +561,7 @@ function installTtnetHooks() {
                         const value = safeStr(new ObjC.Object(args[2]));
                         const field = safeStr(new ObjC.Object(args[3]));
                         if (!SIGN_HEADER_RE.test(field)) return;
-                        pushEntry({
+                        const entry = {
                             phase: 'sign_header',
                             stack: 'ttnet',
                             api: 'TTHttpRequest' + sel,
@@ -549,7 +571,11 @@ function installTtnetHooks() {
                             value: truncate(value, 1200),
                             headers: { [field]: truncate(value, 1200) },
                             signHeaders: { [field]: truncate(value, 1200) },
-                        });
+                        };
+                        if (opts.signTrace) {
+                            entry.backtrace = briefBacktrace(this.context, 12);
+                        }
+                        pushEntry(entry);
                     } catch (_e) { /* */ }
                 },
             });
@@ -571,7 +597,7 @@ function installTtnetHooks() {
                         try {
                             url = safeStr(new ObjC.Object(args[0]).URL().absoluteString());
                         } catch (_e) { /* */ }
-                        pushEntry({
+                        const entry = {
                             phase: 'sign_header',
                             stack: 'ttnet',
                             api: 'NSMutableURLRequest.setValue:forHTTPHeaderField:',
@@ -581,7 +607,11 @@ function installTtnetHooks() {
                             value,
                             headers: { [field]: value },
                             signHeaders: { [field]: value },
-                        });
+                        };
+                        if (opts.signTrace) {
+                            entry.backtrace = briefBacktrace(this.context, 12);
+                        }
+                        pushEntry(entry);
                     } catch (_e) { /* */ }
                 },
             });
@@ -637,6 +667,7 @@ export function netEnable(options) {
         captureResponse: false,
         urlFilter: '',
         captureMode: 'all',
+        signTrace: false,
     };
     if (options && typeof options === 'object') {
         if (options.maxBody != null) {
@@ -650,6 +681,9 @@ export function netEnable(options) {
         }
         if (Object.prototype.hasOwnProperty.call(options, 'captureMode')) {
             next.captureMode = normalizeMode(options.captureMode);
+        }
+        if (options.signTrace != null) {
+            next.signTrace = !!options.signTrace;
         }
     }
     opts = next;
@@ -670,7 +704,9 @@ export function netEnable(options) {
         note:
             'captureMode=nsurl|ttnet|all. iOS sign: x-security-argus / x-Tt-Token / x-metasec-* ' +
             '(classic X-Gorgon often absent). captureResponse=true → TTNet onReadResponseData+setIsCompleted. ' +
-            'RE: net_dump({redact:false,dedupe:false,query:\"imapi|/im/|profile/self|security-argus\"}).',
+            'signTrace=true → backtrace on sign_header writes. ' +
+            'RE: net_dump({redact:false,dedupe:false,query:\"imapi|/im/|profile/self|security-argus\"}). ' +
+            'Signing = in-app MetaSec via TTNet (no offline Argus rewrite).',
     };
 }
 
@@ -729,6 +765,31 @@ export function netDump(options) {
         returned: slice.length,
         enabled,
         opts: Object.assign({}, opts),
+        entries: slice,
+    };
+}
+
+/**
+ * Recent sign_header / request entries that carry MetaSec-style headers.
+ * Observability only — does not recompute Argus offline.
+ */
+export function signLast(options) {
+    const limit = Math.min(100, Math.max(1, Number((options && options.limit) || 20)));
+    const list = entries.filter((e) => {
+        if (e.phase === 'sign_header') return true;
+        if (e.signHeaders && typeof e.signHeaders === 'object') {
+            return Object.keys(e.signHeaders).length > 0;
+        }
+        return false;
+    });
+    const slice = list.slice(-limit);
+    return {
+        ok: true,
+        count: list.length,
+        returned: slice.length,
+        signTrace: !!opts.signTrace,
+        note:
+            'In-app MetaSec I/O only. Enable with net_enable({ signTrace: true }) or session_open netOptions.',
         entries: slice,
     };
 }
