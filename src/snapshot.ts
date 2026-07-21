@@ -97,19 +97,17 @@ function isLikelyInputClass(className: string): boolean {
 }
 
 /**
- * Hot-search / suggestion chips (TikTok search page) — NOT editable fields.
- * Real search bar is wide (~200+) or has SearchBar/TextField class.
+ * TikTok search-page suggestion / section chrome below the top search bar.
+ * Must win over className: trend cells often contain "TextField"/"Search" in the class
+ * and were wrongly marked [input] (likelyInput≈24 on search page).
+ *
+ * Real editable field: top search bar (cy ≲ 78) OR full-width bar (w ≥ 300).
  */
-function isHotSearchChip(text: string, frame: Frame, className: string): boolean {
-  if (isLikelyInputClass(className)) return false;
-  const t = text.trim();
-  if (t.length < 6) return false;
-  // Chip row: short height, not full-width bar
-  if (frame.h > 0 && frame.h <= 34 && frame.w > 0 && frame.w < 280) {
-    // Explicit search chrome is handled separately; suggestions are free text
-    if (!/^(搜尋|搜索|Search|検索|Cancel|取消)$/i.test(t)) return true;
-  }
-  return false;
+function isSuggestionChrome(frame: Frame): boolean {
+  if (!(frame.cy > 78)) return false;
+  if (!(frame.h > 0 && frame.h <= 36)) return false;
+  if (!(frame.w > 0 && frame.w < 300)) return false;
+  return true;
 }
 
 /** Placeholder / search chrome — not nav chips like 有什麼好事 / hot queries */
@@ -137,10 +135,13 @@ function guessLikelyInput(
   frame: Frame,
   className: string,
 ): boolean {
-  if (isHotSearchChip(text, frame, className)) return false;
+  // Geometry first — ignore misleading TikTok cell class names
+  if (isSuggestionChrome(frame)) return false;
+
   if (isLikelyInputClass(className)) return true;
   if (isLikelyInputText(text, frame)) return true;
-  // Wide short bar + search-ish placeholder (real search field, not chip)
+
+  // Top / full-width search-ish placeholder
   if (
     frame.w >= 160 &&
     frame.h >= 28 &&

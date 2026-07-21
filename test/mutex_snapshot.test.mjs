@@ -78,6 +78,17 @@ describe("snapshot likelyInput", () => {
           className: "TUXLabel",
         },
         {
+          // Misleading class (TikTok trend cells) must still NOT be [input]
+          codes: [..."ブルダック カルボ アレンジ"].map((c) => c.charCodeAt(0)),
+          frame: { x: 40, y: 600, w: 200, h: 26, cx: 140, cy: 624 },
+          className: "AWESearchTextFieldCell",
+        },
+        {
+          codes: [..."猜您喜歡"].map((c) => c.charCodeAt(0)),
+          frame: { x: 16, y: 86, w: 68, h: 20, cx: 50, cy: 96 },
+          className: "UILabel",
+        },
+        {
           codes: [..."搜尋"].map((c) => c.charCodeAt(0)),
           frame: { x: 368, y: 34, w: 30, h: 17, cx: 383, cy: 42 },
           className: "UILabel",
@@ -87,15 +98,28 @@ describe("snapshot likelyInput", () => {
           frame: { x: 48, y: 24, w: 304, h: 36, cx: 200, cy: 42 },
           className: "AWESearchBar",
         },
+        {
+          codes: [..."hello"].map((c) => c.charCodeAt(0)),
+          frame: { x: 48, y: 24, w: 304, h: 36, cx: 200, cy: 42 },
+          className: "UISearchBarTextField",
+        },
       ],
       { width: 414, height: 736 },
     );
     const chip = table.nodes.find((n) => n.text.includes("ヤマル"));
+    const fakeField = table.nodes.find((n) => n.text.includes("ブルダック"));
+    const section = table.nodes.find((n) => n.text === "猜您喜歡");
     const btn = table.nodes.find((n) => n.text === "搜尋");
     const bar = table.nodes.find((n) => n.text.includes("ワールドカップ"));
+    const typed = table.nodes.find((n) => n.text === "hello");
     assert.equal(chip?.likelyInput, undefined);
+    assert.equal(fakeField?.likelyInput, undefined);
+    assert.equal(section?.likelyInput, undefined);
     assert.equal(btn?.likelyInput, undefined);
     assert.equal(bar?.likelyInput, true);
+    assert.equal(typed?.likelyInput, true);
+    const inputs = table.nodes.filter((n) => n.likelyInput);
+    assert.equal(inputs.length, 2);
   });
 });
 
