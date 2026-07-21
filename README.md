@@ -49,7 +49,7 @@ kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject age
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `FRIDA_MCP_OPEN_TIMEOUT_MS` | `60000` | spawn/attach/inject total timeout |
-| `FRIDA_MCP_CLOSE_TIMEOUT_MS` | `5000` | soft timeout for script unload/detach (won't pin the lock) |
+| `FRIDA_MCP_CLOSE_TIMEOUT_MS` | `8000` | soft timeout for script unload/detach (won't pin the lock) |
 | `FRIDA_MCP_LOCK_WAIT_MS` | `90000` | max wait to acquire appLock/sbLock |
 | `FRIDA_MCP_TOOLS` | `all` | `core` = hide net/photos/dual extras from MCP tool list |
 | `FRIDA_MCP_ALLOW_DEBUG_TOOLS` | unset | `1` = register `rpc_call` / `dump_modal` / `set_text_at_point` |

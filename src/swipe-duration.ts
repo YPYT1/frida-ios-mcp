@@ -1,12 +1,13 @@
 /**
  * Agent swipe() expects duration in **seconds** (default ~0.4–0.6).
- * AI often passes milliseconds (e.g. 280 → 280s → 16k steps → appLock stuck).
+ * AI often passes milliseconds via `duration` (e.g. 280 → 280s → 16k steps → appLock stuck).
+ * Prefer explicit `durationMs` — that path is intentional and should not warn.
  */
 
 export type SwipeDurationNorm = {
   /** Seconds passed to Frida agent */
   seconds: number;
-  /** True when caller likely meant ms and we converted */
+  /** True when ambiguous `duration` was treated as ms */
   coercedFromMs: boolean;
   /** True when value was clamped to [min,max] */
   clamped: boolean;
@@ -21,7 +22,7 @@ const MS_HINT_THRESHOLD = 10;
 
 /**
  * Normalize swipe duration to agent seconds.
- * - Prefer durationMs when provided
+ * - Prefer durationMs when provided (no coerce warn)
  * - duration ≤ 10 → seconds; duration > 10 → milliseconds (common AI mistake)
  */
 export function normalizeSwipeDuration(opts: {
@@ -33,7 +34,6 @@ export function normalizeSwipeDuration(opts: {
 
   if (opts.durationMs != null && Number.isFinite(opts.durationMs)) {
     seconds = opts.durationMs / 1000;
-    coercedFromMs = true;
   } else if (opts.duration != null && Number.isFinite(opts.duration)) {
     if (opts.duration > MS_HINT_THRESHOLD) {
       seconds = opts.duration / 1000;
@@ -59,7 +59,7 @@ export function normalizeSwipeDuration(opts: {
   const parts: string[] = [];
   if (coercedFromMs) {
     parts.push(
-      `duration interpreted as milliseconds → ${seconds.toFixed(2)}s (agent uses seconds)`,
+      `duration=${opts.duration} treated as milliseconds → ${seconds.toFixed(2)}s (prefer durationMs)`,
     );
   }
   if (clamped) {

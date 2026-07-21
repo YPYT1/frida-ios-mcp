@@ -203,6 +203,7 @@ export function buildTextSnapshot(
       className: className || undefined,
     });
   }
+  dedupeStackedLikelyInputs(nodes);
   return {
     window: window ?? undefined,
     nodes,
@@ -210,6 +211,38 @@ export function buildTextSnapshot(
     createdAt: Date.now(),
     generation,
   };
+}
+
+/**
+ * Search bar often yields 2 overlapping [input] nodes (outer AWESearchBar + inner label/field)
+ * with the same typed text. Keep the larger / more field-like one so likelyInput≈1.
+ */
+function inputClassScore(className?: string): number {
+  const c = (className || "").toLowerCase();
+  // Labels are chrome on top of the field — never prefer them over the bar
+  if (c.includes("label")) return 0;
+  if (c.includes("uitextfield") || c.includes("uisearchbartextfield")) return 3;
+  if (c.includes("awesearchbar") || c.includes("searchbar")) return 2;
+  if (c.includes("textfield") || c.includes("textview")) return 1;
+  return 0;
+}
+
+function dedupeStackedLikelyInputs(nodes: TextNode[]): void {
+  const inputs = nodes.filter((n) => n.likelyInput && n.onScreen !== false);
+  for (let i = 0; i < inputs.length; i++) {
+    const a = inputs[i];
+    if (!a.likelyInput) continue;
+    for (let j = i + 1; j < inputs.length; j++) {
+      const b = inputs[j];
+      if (!b.likelyInput) continue;
+      if (a.text.trim() !== b.text.trim()) continue;
+      if (Math.abs(a.cx - b.cx) > 24 || Math.abs(a.cy - b.cy) > 14) continue;
+      const scoreA = inputClassScore(a.className) * 1000 + a.w * a.h;
+      const scoreB = inputClassScore(b.className) * 1000 + b.w * b.h;
+      if (scoreA >= scoreB) b.likelyInput = undefined;
+      else a.likelyInput = undefined;
+    }
+  }
 }
 
 /**

@@ -26,10 +26,10 @@ export function lockWaitTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 90_000;
 }
 
-/** Default 5s — unload/detach must not hold appLock forever */
+/** Default 8s — unload/detach must not hold appLock forever (5s often raced TikTok unload) */
 export function closeTimeoutMs(): number {
   const n = Number(process.env.FRIDA_MCP_CLOSE_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5_000;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 8_000;
 }
 
 /** Wall clock for whole session_open critical section (close + spawn). */
@@ -489,18 +489,23 @@ export async function closeLiveSession(
   if (!live) return { timedOut: false };
   live.alive = false;
   let timedOut = false;
-  const cleanup = (async () => {
-    try {
-      await live.script.unload();
-    } catch {
-      /* ignore */
-    }
-    try {
-      await live.session.detach();
-    } catch {
-      /* ignore */
-    }
-  })();
+  // Unload + detach in parallel — sequential unload hang used to burn the whole budget.
+  const cleanup = Promise.allSettled([
+    (async () => {
+      try {
+        await live.script.unload();
+      } catch {
+        /* ignore */
+      }
+    })(),
+    (async () => {
+      try {
+        await live.session.detach();
+      } catch {
+        /* ignore */
+      }
+    })(),
+  ]).then(() => undefined);
   try {
     await Promise.race([
       cleanup,

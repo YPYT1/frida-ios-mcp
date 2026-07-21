@@ -350,7 +350,7 @@ export const PROBE_HELP = {
     locks:
       "appLock serializes ALL app acts; sbLock separate — App+SB concurrent OK. " +
       "session_open holds the lock with holdTimeout (open+close budget, ~70s default) so hung Frida detach/spawn cannot pin the lock forever. " +
-      "closeLiveSession soft-times out (FRIDA_MCP_CLOSE_TIMEOUT_MS, default 5s); app close timeout also best-effort kills app pid. " +
+      "closeLiveSession soft-times out (FRIDA_MCP_CLOSE_TIMEOUT_MS, default 8s); app close timeout also best-effort kills app pid. " +
       "Hold timeout / SESSION_OPEN_TIMEOUT auto-kills inFlightPid/lastAppPid and sets orphanFridaOpPossible. " +
       "Lock wait: FRIDA_MCP_LOCK_WAIT_MS (default 90s). Spawn: FRIDA_MCP_OPEN_TIMEOUT_MS (default 60s). " +
       "If MCP looks half-dead: session_status → session_force_unlock (kills orphan) → ONE open. " +

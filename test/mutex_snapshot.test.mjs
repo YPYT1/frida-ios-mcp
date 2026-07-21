@@ -121,6 +121,33 @@ describe("snapshot likelyInput", () => {
     const inputs = table.nodes.filter((n) => n.likelyInput);
     assert.equal(inputs.length, 2);
   });
+
+  it("dedupes stacked search-bar [input] with same text", () => {
+    const table = buildTextSnapshot(
+      [
+        {
+          codes: [..."ok"].map((c) => c.charCodeAt(0)),
+          frame: { x: 48, y: 24, w: 304, h: 36, cx: 200, cy: 42 },
+          className: "AWESearchBar",
+        },
+        {
+          codes: [..."ok"].map((c) => c.charCodeAt(0)),
+          frame: { x: 79, y: 24, w: 245, h: 36, cx: 201.5, cy: 42 },
+          className: "UISearchBarTextFieldLabel",
+        },
+        {
+          codes: [..."成人式　写真"].map((c) => c.charCodeAt(0)),
+          frame: { x: 40, y: 320, w: 96, h: 21, cx: 88, cy: 336 },
+          className: "LynxTextView",
+        },
+      ],
+      { width: 414, height: 736 },
+    );
+    const inputs = table.nodes.filter((n) => n.likelyInput);
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].text, "ok");
+    assert.equal(inputs[0].className, "AWESearchBar");
+  });
 });
 
 describe("presets", () => {
@@ -175,11 +202,18 @@ describe("swipe duration", () => {
     const { normalizeSwipeDuration } = await import("../dist/swipe-duration.js");
     const a = normalizeSwipeDuration({ durationMs: 400 });
     assert.ok(Math.abs(a.seconds - 0.4) < 0.001);
+    assert.equal(a.coercedFromMs, false);
+    assert.equal(a.warn, undefined);
     const b = normalizeSwipeDuration({ durationMs: 60_000 });
     assert.equal(b.seconds, 2.5);
     assert.equal(b.clamped, true);
+    assert.equal(b.coercedFromMs, false);
+    assert.match(b.warn || "", /clamped/);
     const c = normalizeSwipeDuration({ duration: 0.5 });
     assert.equal(c.coercedFromMs, false);
     assert.equal(c.seconds, 0.5);
+    const d = normalizeSwipeDuration({ duration: 280 });
+    assert.equal(d.coercedFromMs, true);
+    assert.match(d.warn || "", /prefer durationMs/);
   });
 });
