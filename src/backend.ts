@@ -140,7 +140,8 @@ export async function handleMethod(
       }
       case "session_close": {
         const closeSpringBoard = params.closeSpringBoard !== false;
-        const r = await sessionStore.close({ closeSpringBoard });
+        const closePhotos = params.closePhotos !== false;
+        const r = await sessionStore.close({ closeSpringBoard, closePhotos });
         return jsonResult({
           open: false,
           message: closeSpringBoard
@@ -249,6 +250,13 @@ export async function handleMethod(
           x: params.x != null ? Number(params.x) : undefined,
           y: params.y != null ? Number(params.y) : undefined,
           resnapshot: boolParam(params.resnapshot, true),
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_open_search": {
+        const r = await sessionStore.openTikTokSearch({
+          maxTries:
+            params.maxTries != null ? Number(params.maxTries) : undefined,
         });
         return jsonResult(r);
       }

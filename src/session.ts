@@ -21,6 +21,10 @@ import {
   TIKTOK_WAIT_HINT,
 } from "./safety.js";
 import {
+  looksLikeTikTokSearchPage,
+  TIKTOK_SEARCH_ENTRY_POINTS,
+} from "./tiktok-search.js";
+import {
   buildTextSnapshot,
   formatSnapshot,
   resolveSearchMode,
@@ -731,19 +735,26 @@ class SessionStore {
    * Close app session. Default also tears down SpringBoard.
    * closeSpringBoard:false keeps SB intentionally (springboardKept, not an error).
    */
-  async close(opts: { closeSpringBoard?: boolean } = {}): Promise<{
+  async close(opts: {
+    closeSpringBoard?: boolean;
+    /** Default true — tear down Photos side channel so photosAlive does not linger */
+    closePhotos?: boolean;
+  } = {}): Promise<{
     appClosed: boolean;
     springboardClosed: boolean;
     springboardAlive: boolean;
     springboardKept?: boolean;
+    photosClosed?: boolean;
     hint?: string;
     closeTimedOut?: boolean;
     orphanKilled?: boolean;
   }> {
     const closeSb = opts.closeSpringBoard !== false;
+    const closePhotos = opts.closePhotos !== false;
     this.closeInFlight = { keepSb: !closeSb };
     let closeTimedOut = false;
     let orphanKilled = false;
+    let photosClosed = false;
     try {
       await this.appLock.run(
         async () => {
@@ -757,28 +768,40 @@ class SessionStore {
           op: "session_close",
         },
       );
-      let springboardClosed = false;
       if (closeSb) {
         this.sbKeepIntentional = false;
         await this.sbClose();
-        springboardClosed = true;
+      } else {
+        this.sbKeepIntentional = !!this.sbLive?.alive;
+      }
+      if (closePhotos) {
+        try {
+          await photosChannel.close({ kill: true });
+          photosClosed = true;
+        } catch {
+          photosClosed = false;
+        }
+      }
+      if (closeSb) {
         return {
           appClosed: true,
           springboardClosed: true,
           springboardAlive: false,
+          photosClosed: closePhotos ? photosClosed : undefined,
           closeTimedOut: closeTimedOut || undefined,
           orphanKilled: orphanKilled || undefined,
           hint: orphanKilled
             ? "App close timed out; orphan pid killed. Safe to session_open."
-            : "App and SpringBoard sessions closed.",
+            : "App and SpringBoard sessions closed" +
+              (closePhotos ? " (Photos side channel cleared)." : "."),
         };
       }
-      this.sbKeepIntentional = !!this.sbLive?.alive;
       return {
         appClosed: true,
         springboardClosed: false,
         springboardAlive: !!this.sbLive?.alive,
         springboardKept: this.sbKeepIntentional,
+        photosClosed: closePhotos ? photosClosed : undefined,
         closeTimedOut: closeTimedOut || undefined,
         orphanKilled: orphanKilled || undefined,
         hint: this.sbKeepIntentional
@@ -828,6 +851,11 @@ class SessionStore {
 
     await this.detachAppSessionUnlocked();
     await this.detachSbSessionUnlocked();
+    try {
+      await photosChannel.close({ kill: true });
+    } catch {
+      /* ignore */
+    }
 
     this.lastAppPid = null;
     this.lastAppUdid = undefined;
@@ -1268,6 +1296,63 @@ class SessionStore {
       const snapshot = await this.maybeResnapshot(opts.resnapshot);
       return this.actEnvelope(result, snapshot, { action: "tap", at: { x, y } });
     });
+  }
+
+  /**
+   * Open TikTok search landing from For You feed by tapping the top-right magnifier
+   * (not the「搜尋」submit button). Retries a few known points until search chrome appears.
+   */
+  async openTikTokSearch(opts: { maxTries?: number } = {}): Promise<Record<string, unknown>> {
+    return this.withAppOp(async () => {
+      const settle = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      const snapOpts = { ...SessionStore.DEFAULT_SNAP, limit: 40 };
+      const first = await this.screenSnapshotBody(snapOpts);
+      if (looksLikeTikTokSearchPage(first.table.nodes)) {
+        return {
+          ok: true,
+          alreadyOpen: true,
+          attempts: 0,
+          snapshot: first.text,
+          next: "smart_type_text on wide [input]; then tap 搜尋 submit (not smart_type)",
+        };
+      }
+      const maxTries = Math.min(
+        TIKTOK_SEARCH_ENTRY_POINTS.length,
+        Math.max(1, opts.maxTries ?? TIKTOK_SEARCH_ENTRY_POINTS.length),
+      );
+      const tried: Array<{ x: number; y: number }> = [];
+      let lastSnap = first.text;
+      for (let i = 0; i < maxTries; i++) {
+        const p = TIKTOK_SEARCH_ENTRY_POINTS[i];
+        tried.push(p);
+        this.beginUiAct();
+        await this.rpc("tap", [p.x, p.y]);
+        await settle(500);
+        const { text, table } = await this.screenSnapshotBody(snapOpts);
+        lastSnap = text;
+        if (looksLikeTikTokSearchPage(table.nodes)) {
+          return {
+            ok: true,
+            alreadyOpen: false,
+            at: p,
+            attempts: i + 1,
+            tried,
+            snapshot: text,
+            next: "smart_type_text on wide [input]; then tap 搜尋 submit (not smart_type)",
+          };
+        }
+      }
+      return {
+        ok: false,
+        tried,
+        snapshot: lastSnap,
+        recovery: [
+          "confirm feed is For You (wait_until_texts tiktok_feed)",
+          "tap x≈398 y≈38 manually then screen_snapshot",
+          "avoid tapping the narrow 搜尋 label — that submits a query",
+        ],
+      };
+    }, "tiktok_open_search");
   }
 
   async doubleTap(opts: {

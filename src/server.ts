@@ -49,7 +49,7 @@ export function createMcpServer(): McpServer {
     version: "0.1.0",
   });
 
-  // Tiered registration: FRIDA_MCP_TOOLS=core hides advanced; debug needs ALLOW_DEBUG_TOOLS=1
+  // Tiered registration: FRIDA_MCP_TOOLS=core hides advanced+debug; debug on by default in all
   const reg = ((
     name: string,
     description: string,
@@ -65,7 +65,7 @@ export function createMcpServer(): McpServer {
   }) as typeof server.tool;
 
   console.error(
-    `[frida-mcp] tools mode=${toolsMode()} (set FRIDA_MCP_TOOLS=core to hide net/photos/advanced)`,
+    `[frida-mcp] tools mode=${toolsMode()} (FRIDA_MCP_TOOLS=core hides advanced+debug; ALLOW_DEBUG_TOOLS=0 hides debug only)`,
   );
 
   reg(
@@ -180,15 +180,19 @@ export function createMcpServer(): McpServer {
 
   reg(
     "session_close",
-    "Close app session. Default also closes SpringBoard. closeSpringBoard=false keeps SB intentionally (springboardKept).",
+    "Close app session. Default also closes SpringBoard and clears Photos side channel (photosAlive). closeSpringBoard=false keeps SB; closePhotos=false keeps Photos.",
     {
       closeSpringBoard: z
         .boolean()
         .optional()
         .describe("Default true. false = keep SpringBoard for later (intentional, not an error)."),
+      closePhotos: z
+        .boolean()
+        .optional()
+        .describe("Default true. false = leave Photos.app channel alive."),
     },
-    async ({ closeSpringBoard }) =>
-      toolResult(await run("session_close", { closeSpringBoard })),
+    async ({ closeSpringBoard, closePhotos }) =>
+      toolResult(await run("session_close", { closeSpringBoard, closePhotos })),
   );
 
   reg(
@@ -348,10 +352,23 @@ export function createMcpServer(): McpServer {
     async ({ code, source }) => toolResult(await run("set_otp", { code, source })),
   );
 
-  // Debug tools: registered only when FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 (see tool-tiers)
+  reg(
+    "tiktok_open_search",
+    "From For You feed, open TikTok search landing by tapping the top-right magnifier (retries a few points). Not the narrow 搜尋 submit button. Then smart_type on wide [input], then tap 搜尋 to submit.",
+    {
+      maxTries: z
+        .number()
+        .optional()
+        .describe("Max magnifier tap attempts (default all candidates)"),
+    },
+    async ({ maxTries }) =>
+      toolResult(await run("tiktok_open_search", { maxTries })),
+  );
+
+  // Debug tools: on by default when FRIDA_MCP_TOOLS=all; hide with ALLOW_DEBUG_TOOLS=0 or TOOLS=core
   reg(
     "set_text_at_point",
-    "setText at point — NOT 拟人. Prefer type_text / smart_type_text.",
+    "setText at point — NOT 拟人. Prefer type_text / smart_type_text. Prefer first-class tools for daily probes.",
     {
       text: z.string(),
       ref: z.string().optional(),

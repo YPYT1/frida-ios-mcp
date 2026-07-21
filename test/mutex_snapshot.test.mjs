@@ -176,17 +176,21 @@ describe("tool tiers", () => {
   it("classifies core vs advanced vs debug", () => {
     assert.equal(toolTier("screen_snapshot"), "core");
     assert.equal(toolTier("screen_shot"), "core");
+    assert.equal(toolTier("tiktok_open_search"), "core");
     assert.equal(toolTier("photos_list"), "advanced");
     assert.equal(toolTier("rpc_call"), "debug");
     assert.match(annotateToolDesc("net_dump", "x"), /^\[advanced\]/);
   });
 
-  it("FRIDA_MCP_TOOLS=core hides advanced but keeps screen_shot", () => {
+  it("FRIDA_MCP_TOOLS=core hides advanced+debug but keeps screen_shot", () => {
     const prev = process.env.FRIDA_MCP_TOOLS;
+    const prevDbg = process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
     process.env.FRIDA_MCP_TOOLS = "core";
+    delete process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
     try {
       assert.equal(toolsMode(), "core");
       assert.equal(shouldRegisterTool("tap"), true);
+      assert.equal(shouldRegisterTool("tiktok_open_search"), true);
       assert.equal(shouldRegisterTool("screen_shot"), true);
       assert.equal(shouldRegisterTool("photos_list"), false);
       assert.equal(shouldRegisterTool("net_dump"), false);
@@ -194,7 +198,55 @@ describe("tool tiers", () => {
     } finally {
       if (prev === undefined) delete process.env.FRIDA_MCP_TOOLS;
       else process.env.FRIDA_MCP_TOOLS = prev;
+      if (prevDbg === undefined) delete process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
+      else process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS = prevDbg;
     }
+  });
+
+  it("default all registers debug; ALLOW_DEBUG_TOOLS=0 hides debug only", () => {
+    const prev = process.env.FRIDA_MCP_TOOLS;
+    const prevDbg = process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
+    process.env.FRIDA_MCP_TOOLS = "all";
+    delete process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
+    try {
+      assert.equal(shouldRegisterTool("rpc_call"), true);
+      process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS = "0";
+      assert.equal(shouldRegisterTool("rpc_call"), false);
+      assert.equal(shouldRegisterTool("photos_list"), true);
+    } finally {
+      if (prev === undefined) delete process.env.FRIDA_MCP_TOOLS;
+      else process.env.FRIDA_MCP_TOOLS = prev;
+      if (prevDbg === undefined) delete process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS;
+      else process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS = prevDbg;
+    }
+  });
+});
+
+describe("tiktok search page heuristic", () => {
+  it("detects search landing vs feed", async () => {
+    const { looksLikeTikTokSearchPage } = await import("../dist/tiktok-search.js");
+    assert.equal(
+      looksLikeTikTokSearchPage([
+        { text: "為您推薦", onScreen: true },
+        { text: "首頁", onScreen: true },
+      ]),
+      false,
+    );
+    assert.equal(
+      looksLikeTikTokSearchPage([
+        { text: "猜您喜歡", onScreen: true },
+        { text: "搜尋", onScreen: true },
+        { text: "hello", likelyInput: true, onScreen: true },
+      ]),
+      true,
+    );
+    assert.equal(
+      looksLikeTikTokSearchPage([
+        { text: "搜尋", onScreen: true },
+        { text: "placeholder", likelyInput: true, onScreen: true },
+      ]),
+      true,
+    );
   });
 });
 

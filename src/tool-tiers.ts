@@ -1,9 +1,10 @@
 /**
  * Tool surface tiers — reduce AI misuse of ~40 tools.
  *
- * Default: register ALL (backward compatible).
- * FRIDA_MCP_TOOLS=core → only core + probe_help (net/photos/debug extras hidden).
- * FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 → still required for rpc_call / dump_modal / set_text_at_point.
+ * Default FRIDA_MCP_TOOLS=all → core + advanced + debug (debug annotated `[debug]`).
+ * FRIDA_MCP_TOOLS=core → hide advanced + debug.
+ * Opt out of debug only: FRIDA_MCP_ALLOW_DEBUG_TOOLS=0 (even when mode=all).
+ * Legacy: FRIDA_MCP_ALLOW_DEBUG_TOOLS=1 is no longer required for default `all`.
  */
 
 export type ToolTier = "core" | "advanced" | "debug";
@@ -35,6 +36,7 @@ export const CORE_TOOLS = [
   "first_responder",
   "set_otp",
   "human_pause",
+  "tiktok_open_search",
   "sb_alert_list",
   "sb_alert_dismiss",
   "sb_close",
@@ -82,10 +84,21 @@ export function toolsMode(): "core" | "all" {
   return v === "core" ? "core" : "all";
 }
 
+/** Debug tools on by default in `all`; set FRIDA_MCP_ALLOW_DEBUG_TOOLS=0 to hide. */
+export function debugToolsAllowed(): boolean {
+  const v = (process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS || "").trim();
+  if (v === "0" || v.toLowerCase() === "false" || v.toLowerCase() === "off") {
+    return false;
+  }
+  // Legacy: explicit 1 still means on; empty/`all` mode → on
+  return true;
+}
+
 export function shouldRegisterTool(name: string): boolean {
   const tier = toolTier(name);
   if (tier === "debug") {
-    return process.env.FRIDA_MCP_ALLOW_DEBUG_TOOLS === "1";
+    if (toolsMode() === "core") return false;
+    return debugToolsAllowed();
   }
   if (toolsMode() === "core") {
     return CORE_SET.has(name);
@@ -106,7 +119,7 @@ export const TOOL_TIERS_HELP = {
   advanced: [...ADVANCED_TOOLS],
   debug: [...DEBUG_TOOLS],
   note:
-    "Set FRIDA_MCP_TOOLS=core to hide net/photos/dual extras from the MCP tool list. " +
-    "Debug tools still need FRIDA_MCP_ALLOW_DEBUG_TOOLS=1. " +
+    "Default `all` registers debug tools (`rpc_call` / `dump_modal` / `set_text_at_point`) with a [debug] prefix. " +
+    "Set FRIDA_MCP_TOOLS=core to hide advanced+debug. Set FRIDA_MCP_ALLOW_DEBUG_TOOLS=0 to hide debug only. " +
     "screen_shot = lockdown pixel assist (not Accessibility); screen_snapshot remains primary for refs.",
 };

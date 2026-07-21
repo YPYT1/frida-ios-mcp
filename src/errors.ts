@@ -318,8 +318,8 @@ export const PROBE_HELP = {
   },
   typing: {
     steps: [
-      "1) On Feed, tap the search icon (top-right magnifier) — NOT the later submit label 搜尋",
-      "2) wait { ms: 1500-2500 }",
+      "1) On Feed: tiktok_open_search (preferred) — taps magnifier, not the 搜尋 submit label",
+      "2) Or wait { ms: 1500-2500 } then manual top-right tap if needed",
       "3) screen_snapshot — only the wide search-bar should be [input]; 搜尋/Search submit + hot chips must NOT be [input]",
       "4) smart_type_text({ text, ref of wide [input] bar }) — AWESearchBar may canInsertText=false but still types",
       "5) tap(ref) on narrow 搜尋/搜索/Search to submit the query",
@@ -329,7 +329,7 @@ export const PROBE_HELP = {
     note: "Device must be past safety/login walls; real search-box typing needs a live device — no guaranteed path on locked accounts.",
   },
   avoid: [
-    "rpc_call / dump_modal / set_text_at_point — DEBUG only (set FRIDA_MCP_ALLOW_DEBUG_TOOLS=1)",
+    "prefer first-class tools over rpc_call/dump_modal/set_text_at_point (still registered as [debug] in default all mode; hide with FRIDA_MCP_ALLOW_DEBUG_TOOLS=0)",
     "parallel app acts (tap+swipe together) — engine serializes but still wasteful",
     "human_type alias — use type_text",
     "session_open while orphanFridaOpPossible=true — force_unlock first",

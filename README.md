@@ -74,7 +74,7 @@ Only then start the MCP. If `frida-server` stops, later `session_open` calls wil
 | `attach` to already-foreground TikTok | **Unreliable** (blocked by default; `FRIDA_MCP_ALLOW_ATTACH=1` escape hatch only) |
 | Immediate Accessibility `dump_tree` after launch | Triggers anti-debug; this MCP uses safe text collection instead |
 
-**Search UI tip:** the top **wide** field is the text input (`[input]`). The narrow **搜尋 / 搜索 / Search** label on the right is a **submit button** (tap after typing) — never `smart_type_text` it.
+**Search UI tip:** prefer tool `tiktok_open_search` from For You (taps the top-right magnifier with retries). The top **wide** field is the text input (`[input]`). The narrow **搜尋 / 搜索 / Search** label on the right is a **submit button** (tap after typing) — never `smart_type_text` it.
 
 ### Spawn-only (this device stack)
 
@@ -106,7 +106,7 @@ kill old pid → device.spawn(bundleId) suspended → attach(pid) → inject age
 | `FRIDA_MCP_CLOSE_TIMEOUT_MS` | `8000` | soft timeout for script unload/detach (won't pin the lock) |
 | `FRIDA_MCP_LOCK_WAIT_MS` | `90000` | max wait to acquire appLock/sbLock |
 | `FRIDA_MCP_TOOLS` | `all` | `core` = hide net/photos/dual extras from MCP tool list |
-| `FRIDA_MCP_ALLOW_DEBUG_TOOLS` | unset | `1` = register `rpc_call` / `dump_modal` / `set_text_at_point` |
+| `FRIDA_MCP_ALLOW_DEBUG_TOOLS` | unset (on) | Default `all` registers debug tools. Set `0`/`false`/`off` to hide `rpc_call` / `dump_modal` / `set_text_at_point` only |
 
 `session_open` also has a **hold timeout** (~open+close+5s): if Frida close/spawn hangs but the event loop is alive, the lock is released with `APP_LOCK_HOLD_TIMEOUT` instead of pinning forever. On hold/open timeout the server **best-effort kills** `inFlightPid` / last app pid and sets `orphanFridaOpPossible`. Soft-close timeout on the **app** channel also kills that pid (SpringBoard is never killed).
 
@@ -211,13 +211,13 @@ pnpm cli close
 - `summaryOnly: true` for host counts only  
 - `redact:false` / `includeDataUrls` / `includeBinaryBodies` only on trusted local machines — never paste raw dumps into issues/PRs.
 
-**Typing (real input path):** Feed → tap **magnifying-glass / search entry** (top-right icon, not the later submit label) → `wait` → `screen_snapshot` → `smart_type_text` on the **wide `[input]`** search bar (placeholder or typed text) → then `tap` the narrow **搜尋 / 搜索 / Search** **submit button** to run the query.  
+**Typing (real input path):** Feed → `tiktok_open_search` (preferred; retries magnifier points) → `smart_type_text` on the **wide `[input]`** search bar → then `tap` the narrow **搜尋 / 搜索 / Search** **submit button** to run the query.  
 Never `smart_type_text` on nav tabs or on the submit **搜尋** button itself.  
 Nav / composer chips (e.g. “What's on your mind”) are **not** fields → `NOT_INPUT`.
 
 **SB test alert:** `sb_alert_trigger` → `sb_alert_list` (`hasAlert`) → single `sb_alert_dismiss` (post-settle `cleared`) or stacked `sb_alert_dismiss({ all: true })`; if `needsRetry` re-list / retry `all`.
 
-**Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): only registered if `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
+**Debug tools** (`rpc_call`, `dump_modal`, `set_text_at_point`): registered by default in `FRIDA_MCP_TOOLS=all` (prefixed `[debug]`). Hide with `FRIDA_MCP_ALLOW_DEBUG_TOOLS=0`, or hide advanced+debug with `FRIDA_MCP_TOOLS=core`.
 
 ## Modes
 
@@ -307,7 +307,7 @@ FRIDA_MCP_MODE = "daemon"
 | `set_otp` | TikTok OTP fill (`setOtpCode`) |
 | `set_text_at_point` | coordinate setText (not humanized; debug) |
 | `dump_modal` | mid-screen modal (blocked on TikTok; debug) |
-| `rpc_call` | whitelisted agent RPC (debug; needs `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`) |
+| `rpc_call` | whitelisted agent RPC (`[debug]`; on by default in `all`, hide with `ALLOW_DEBUG_TOOLS=0`) |
 | `process_list` | device processes (pid/name) |
 | `sb_alert_trigger` / `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
 | `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession capture (TLS plaintext after app decrypt) |
@@ -331,7 +331,7 @@ Agent: `agent/text_input/comment.js` (same approach as fleetcontrol).
 - `screen_snapshot` defaults: `onScreenOnly=true`, `limit=40`; optional `search` / `showDiff`.
 - `tap` / `swipe` / `smart_type_text` default `resnapshot=true` (returns `snapshot`).
 - Errors return `{ code, recovery[] }` (e.g. `SCRIPT_DESTROYED` → respawn).
-- Start probes with `probe_help`; debug tools need `FRIDA_MCP_ALLOW_DEBUG_TOOLS=1`.
+- Start probes with `probe_help`; prefer first-class tools over `[debug]` `rpc_call` (hide debug with `FRIDA_MCP_ALLOW_DEBUG_TOOLS=0`).
 
 ### Network capture
 
