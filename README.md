@@ -337,20 +337,21 @@ Agent: `agent/text_input/comment.js` (same approach as fleetcontrol).
 
 ```text
 # Best: capture launch traffic (hooks before resume)
-session_open { bundleId, captureNet:true, netOptions:{ captureMode:"all", maxBody:16384 } }
-  → wait_until_texts / use app → net_dump({ redact:false, dedupe:false, query:"tiktokv" })
-
-# TTNet-only (TikTok business APIs)
-net_enable({ captureMode:"ttnet", maxBody:16384 }) → … → net_dump({ redact:false, dedupe:false })
+session_open {
+  bundleId,
+  captureNet: true,
+  netOptions: { captureMode: "all", maxBody: 16384, captureResponse: true }
+}
+  → use app (Inbox / Profile)
+  → net_dump({ redact:false, dedupe:false, query:"imapi|inbox|/im/|profile/self|security-argus", includeBinaryBodies:true, limit:100 })
 ```
 
-- **Scope:** injected process only (not system-wide MITM).
-- **`captureMode`:** `nsurl` (SDK/`NSURLSession`) | `ttnet` (TikTok `TTHttpTaskChromium` after request filters) | `all` (default).
-- **Sees (ttnet):** `api.tiktokv.com` / `aweme` URLs, method, headers (incl. `x-Tt-Token` etc.), `signHeaders` extract, URL `query`, body preview.
-- **Sees (nsurl):** SnapKit / AppsFlyer / other `NSURLSession` traffic.
-- **Default:** `captureResponse=false` (request-only). NSURLSession response wrap is optional; TTNet response hooks are not enabled (unstable / kill scripts).
-- **RE dump tip:** `redact:false`, `dedupe:false`, `includeBinaryBodies:true`, `query:"tiktokv"` or `query:"sign_header"`.
-- **Gap:** headers applied only inside native Cronet after ObjC filters may still be missing; not a full packet MITM.
+- **`captureMode`:** `nsurl` | `ttnet` | `all` (default).
+- **iOS sign headers (45.x):** `x-security-argus`, `x-Tt-Token`, `x-metasec-*`, ticket/device-guard — **classic `X-Gorgon` / `X-Argus` names are often absent** on this build.
+- **Responses:** `captureResponse:true` uses TTNet `onReadResponseData` + `setIsCompleted`. Do **not** hook `onURLFetchComplete` (kills script). Many JSON/IM payloads may still arrive empty via this path (protobuf/other channels); binary/CDN bodies usually populate.
+- **DM / works URLs seen on device:** `imapi-*.tiktokv.com/v1/message/get_by_user`, `…/v2/message/get_by_user_init`, `tiktok/v1/im/inbox_data/get`, `aweme/v1/user/profile/self`, feed/post endpoints.
+- **Network-level DM reply:** not a raw HTTP replay — requests need live MetaSec signing (`x-security-argus`). Prefer in-app IM (`AWEIMSendMessageController`) or UI automation; external replay without signing will fail.
+- **RE dump tip:** `redact:false`, `dedupe:false`, `includeBinaryBodies:true`.
 
 ## NSSM (only after device tools work)
 

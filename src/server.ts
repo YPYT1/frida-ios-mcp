@@ -588,7 +588,9 @@ export function createMcpServer(): McpServer {
       captureResponse: z
         .boolean()
         .optional()
-        .describe("NSURLSession response wrap only; default false"),
+        .describe(
+          "Capture response bodies. TTNet: onReadResponseData+setIsCompleted (+JSON correlate). NSURLSession: completion wrap. Default false.",
+        ),
       urlFilter: z
         .string()
         .optional()

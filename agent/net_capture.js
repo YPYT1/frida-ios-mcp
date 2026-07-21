@@ -3,13 +3,15 @@
  *
  * Layers:
  *   - nsurl: NSURLSession task creation (+ optional completionHandler wrap)
- *   - ttnet: TikTok TTHttpTaskChromium after request filters ( Cronet path )
+ *   - ttnet: TikTok TTHttpTaskChromium after request filters (Cronet path)
  *
  * captureMode: "nsurl" | "ttnet" | "all" (default all)
- * captureResponse: NSURLSession completion wrap only (TTNet response hooks are unstable).
+ * captureResponse:
+ *   - ttnet: onReadResponseData + setIsCompleted (stable). Never onURLFetchComplete.
+ *   - nsurl: completionHandler wrap only when TTHttpTaskChromium is absent.
  *
- * TTNet captures headers AFTER runRequestFiltersAndStart (includes x-Tt-Token etc.).
- * Native Cronet-only headers not mirrored to TTHttpRequest may still be missing.
+ * iOS TikTok 45.x signs with x-security-argus / x-Tt-Token / x-metasec-*
+ * (classic Android X-Gorgon / X-Argus header names often absent).
  */
 import ObjC from 'frida-objc-bridge';
 
@@ -27,9 +29,17 @@ let hooksInstalled = false;
 const hooked = [];
 let ttnetHooksInstalled = false;
 let nsurlHooksInstalled = false;
+let ttnetResponseHooksInstalled = false;
+
+/** taskPtr -> { total, previewU8 } */
+const ttnetRespBuf = new Map();
+/** taskPtr -> request base captured at filters */
+const ttnetReqByTask = new Map();
+/** recent requests for JSON correlation */
+const recentTtnetReqs = [];
 
 const SIGN_HEADER_RE =
-    /gorgon|argus|ladon|khronos|helios|medusa|metasec|x-ss-stub|x-ss-req-ticket|x-tt-token|x-tt-dt|x-tt-multi|x-bd-kmsv|mstoken|x-vc-bdturing|x-ttnet-request|tt-request-time/i;
+    /gorgon|argus|ladon|khronos|helios|medusa|metasec|security-argus|x-ss-stub|x-ss-req-ticket|x-tt-token|x-tt-dt|x-tt-multi|x-bd-kmsv|mstoken|x-vc-bdturing|x-ttnet-request|tt-request-time|ticket-guard|device-guard/i;
 
 function safeStr(v) {
     try {
@@ -231,7 +241,7 @@ function pushEntry(entry) {
     } catch (_e) { /* */ }
 }
 
-function captureFromRequest(req, api, stack) {
+function captureFromRequest(req, api, stack, taskPtr) {
     try {
         const url = safeStr(req.URL() && req.URL().absoluteString());
         const method = safeStr(req.HTTPMethod() || 'GET');
@@ -239,6 +249,11 @@ function captureFromRequest(req, api, stack) {
         const body = bodyFromReq(req);
         const base = { method, url, headers, body, api, stack };
         pushEntry({ phase: 'request', method, url, headers, body, api, stack });
+        if (stack === 'ttnet') {
+            recentTtnetReqs.push({ ts: Date.now(), method, url, headers, body, api });
+            while (recentTtnetReqs.length > 40) recentTtnetReqs.shift();
+            if (taskPtr) ttnetReqByTask.set(taskPtr, base);
+        }
         return base;
     } catch (_e) {
         return { method: '?', url: '', headers: {}, body: null, api, stack };
@@ -315,7 +330,11 @@ function installNsurlHooks() {
         try {
             const req = new ObjC.Object(args[2]);
             const base = captureFromRequest(req, 'dataTaskWithRequest:completionHandler:', 'nsurl');
-            if (opts.captureResponse) args[3] = wrapCompletion(args[3], base);
+            // NSURL completion wrap is optional and can be unstable; skip when TTNet is present
+            // (TikTok). Use captureResponse for TTNet body path instead.
+            if (opts.captureResponse && !ttnetHooksInstalled && !ObjC.classes.TTHttpTaskChromium) {
+                args[3] = wrapCompletion(args[3], base);
+            }
         } catch (_e) { /* */ }
     });
 
@@ -334,7 +353,9 @@ function installNsurlHooks() {
             const url = safeStr(urlObj.absoluteString && urlObj.absoluteString());
             const base = { method: 'GET', url, headers: {}, body: null, api: 'dataTaskWithURL:completionHandler:', stack: 'nsurl' };
             pushEntry({ phase: 'request', ...base });
-            if (opts.captureResponse) args[3] = wrapCompletion(args[3], base);
+            if (opts.captureResponse && !ObjC.classes.TTHttpTaskChromium) {
+                args[3] = wrapCompletion(args[3], base);
+            }
         } catch (_e) { /* */ }
     });
 
@@ -368,7 +389,9 @@ function installNsurlHooks() {
                         base.body = bodyFromData(new ObjC.Object(args[3]));
                     }
                 } catch (_e) { /* */ }
-                if (opts.captureResponse) args[4] = wrapCompletion(args[4], base);
+                if (opts.captureResponse && !ObjC.classes.TTHttpTaskChromium) {
+                    args[4] = wrapCompletion(args[4], base);
+                }
             } catch (_e) { /* */ }
         },
     );
@@ -389,6 +412,93 @@ function tryHookTtnet(cls, name, selector, callbacks) {
     }
 }
 
+function previewFromU8(u8, totalLen, max) {
+    try {
+        return bytesToPreview(u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength), totalLen, max);
+    } catch (_e) {
+        try {
+            // Frida ArrayBuffer from readByteArray
+            return bytesToPreview(u8, totalLen, max);
+        } catch (_e2) {
+            return { encoding: 'raw', length: totalLen };
+        }
+    }
+}
+
+function installTtnetResponseHooks(C) {
+    if (ttnetResponseHooksInstalled) return;
+    // Accumulate body chunks (stable). Do NOT hook onURLFetchComplete: (kills TikTok script).
+    tryHookTtnet(C, 'onReadResponseData:', '- onReadResponseData:', {
+        onEnter(args) {
+            if (!enabled || !opts.captureResponse || !modeIncludes('ttnet')) return;
+            try {
+                const key = args[0].toString();
+                const data = args[2] && !args[2].isNull() ? new ObjC.Object(args[2]) : null;
+                if (!data) return;
+                const len = Number(data.length());
+                if (len <= 0) return;
+                let ent = ttnetRespBuf.get(key);
+                if (!ent) {
+                    ent = { total: 0, preview: null };
+                    ttnetRespBuf.set(key, ent);
+                }
+                ent.total += len;
+                if (!ent.preview) {
+                    const max = Math.min(len, opts.maxBody || 4096);
+                    ent.preview = data.bytes().readByteArray(max);
+                }
+            } catch (_e) { /* */ }
+        },
+    });
+
+    tryHookTtnet(C, 'setIsCompleted:', '- setIsCompleted:', {
+        onEnter(args) {
+            if (!enabled || !opts.captureResponse || !modeIncludes('ttnet')) return;
+            try {
+                if (!args[2].toInt32()) return;
+                const key = args[0].toString();
+                const self = new ObjC.Object(args[0]);
+                const base = ttnetReqByTask.get(key) || {};
+                ttnetReqByTask.delete(key);
+                const buf = ttnetRespBuf.get(key);
+                ttnetRespBuf.delete(key);
+                let url = base.url || '';
+                let method = base.method || '?';
+                let headers = base.headers || {};
+                try {
+                    const req = self.request();
+                    if (req && !req.handle.isNull()) {
+                        if (!url) url = safeStr(req.URL() && req.URL().absoluteString());
+                        if (!method || method === '?') method = safeStr(req.HTTPMethod() || 'GET');
+                        if (!headers || !Object.keys(headers).length) headers = headersFromReq(req);
+                    }
+                } catch (_e) { /* */ }
+                const entry = {
+                    phase: 'response',
+                    stack: 'ttnet',
+                    api: 'TTHttpTaskChromium.setIsCompleted:',
+                    method,
+                    url,
+                    requestHeaders: headers,
+                    requestBody: base.body || null,
+                };
+                if (buf && buf.preview) {
+                    entry.responseBody = previewFromU8(
+                        new Uint8Array(buf.preview),
+                        buf.total,
+                        opts.maxBody || 4096,
+                    );
+                } else if (buf) {
+                    entry.responseBody = { encoding: 'raw', length: buf.total };
+                }
+                pushEntry(entry);
+            } catch (_e) { /* */ }
+        },
+    });
+
+    ttnetResponseHooksInstalled = true;
+}
+
 function installTtnetHooks() {
     if (ttnetHooksInstalled) return { ok: true, already: true, present: true };
     if (!ObjC.available) return { ok: false, error: 'ObjC not available' };
@@ -399,18 +509,18 @@ function installTtnetHooks() {
         return { ok: true, present: false, note: 'TTHttpTaskChromium not in this process' };
     }
 
-    // Capture AFTER request filters — signed / token headers are usually present here.
-    // Do not also hook resume (would double-count the same request).
+    // Capture AFTER request filters — x-security-argus / x-Tt-Token usually present here.
     tryHookTtnet(C, 'runRequestFiltersAndStart', '- runRequestFiltersAndStart', {
         onEnter(args) {
             this._self = new ObjC.Object(args[0]);
+            this._ptr = args[0].toString();
         },
         onLeave(_retval) {
             if (!enabled || !modeIncludes('ttnet')) return;
             try {
                 const req = this._self.request();
                 if (!req || req.handle.isNull()) return;
-                captureFromRequest(req, 'TTHttpTaskChromium.runRequestFiltersAndStart', 'ttnet');
+                captureFromRequest(req, 'TTHttpTaskChromium.runRequestFiltersAndStart', 'ttnet', this._ptr);
             } catch (_e) { /* */ }
         },
     });
@@ -445,6 +555,43 @@ function installTtnetHooks() {
             });
         }
     }
+
+    // Also watch NSMutableURLRequest (some MetaSec paths set headers here)
+    try {
+        const M = ObjC.classes.NSMutableURLRequest;
+        if (M && M['- setValue:forHTTPHeaderField:']) {
+            Interceptor.attach(M['- setValue:forHTTPHeaderField:'].implementation, {
+                onEnter(args) {
+                    if (!enabled || !modeIncludes('ttnet')) return;
+                    try {
+                        const field = safeStr(new ObjC.Object(args[3]));
+                        if (!SIGN_HEADER_RE.test(field)) return;
+                        const value = truncate(safeStr(new ObjC.Object(args[2])), 1200);
+                        let url = '';
+                        try {
+                            url = safeStr(new ObjC.Object(args[0]).URL().absoluteString());
+                        } catch (_e) { /* */ }
+                        pushEntry({
+                            phase: 'sign_header',
+                            stack: 'ttnet',
+                            api: 'NSMutableURLRequest.setValue:forHTTPHeaderField:',
+                            method: 'SET',
+                            url,
+                            field,
+                            value,
+                            headers: { [field]: value },
+                            signHeaders: { [field]: value },
+                        });
+                    } catch (_e) { /* */ }
+                },
+            });
+            hooked.push('ttnet:NSMutableURLRequest.setValue');
+        }
+    } catch (_e) { /* */ }
+
+    // Response hooks installed once; gated by opts.captureResponse at runtime.
+    // Do NOT install NSJSONSerialization correlate (unstable / script destroyed on TikTok).
+    installTtnetResponseHooks(C);
 
     ttnetHooksInstalled = true;
     return { ok: true, present: true, already: false };
@@ -521,9 +668,9 @@ export function netEnable(options) {
             ttnetPresent: !!(ObjC.classes && ObjC.classes.TTHttpTaskChromium),
         },
         note:
-            'captureMode=nsurl|ttnet|all. TTNet = TikTok Cronet (TTHttpTaskChromium) after filters. ' +
-            'captureResponse only wraps NSURLSession (TTNet response hooks unstable). ' +
-            'Use net_dump({redact:false, dedupe:false}) for reverse-engineering.',
+            'captureMode=nsurl|ttnet|all. iOS sign: x-security-argus / x-Tt-Token / x-metasec-* ' +
+            '(classic X-Gorgon often absent). captureResponse=true → TTNet onReadResponseData+setIsCompleted. ' +
+            'RE: net_dump({redact:false,dedupe:false,query:\"imapi|/im/|profile/self|security-argus\"}).',
     };
 }
 
