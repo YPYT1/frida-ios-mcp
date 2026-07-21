@@ -1,27 +1,35 @@
 /**
- * NSURLSession 网络请求捕获（只读，不修改流量）。
+ * In-process HTTP capture (read-only).
  *
- * 默认只 hook request 创建路径，不包装 completionHandler（更稳）。
- * captureResponse=true 时才包装 Block，部分 App/iOS 版本可能不稳。
+ * Layers:
+ *   - nsurl: NSURLSession task creation (+ optional completionHandler wrap)
+ *   - ttnet: TikTok TTHttpTaskChromium after request filters ( Cronet path )
  *
- * 覆盖：
- *   - dataTaskWithRequest: / dataTaskWithRequest:completionHandler:
- *   - dataTaskWithURL: / dataTaskWithURL:completionHandler:
- *   - uploadTaskWithRequest:fromData:completionHandler:（可选）
+ * captureMode: "nsurl" | "ttnet" | "all" (default all)
+ * captureResponse: NSURLSession completion wrap only (TTNet response hooks are unstable).
+ *
+ * TTNet captures headers AFTER runRequestFiltersAndStart (includes x-Tt-Token etc.).
+ * Native Cronet-only headers not mirrored to TTHttpRequest may still be missing.
  */
 import ObjC from 'frida-objc-bridge';
 
-const MAX_ENTRIES = 300;
+const MAX_ENTRIES = 500;
 const entries = [];
 let enabled = false;
 let seq = 0;
 let opts = {
     maxBody: 4096,
-    captureResponse: false, // safer default
+    captureResponse: false,
     urlFilter: '',
+    captureMode: 'all',
 };
 let hooksInstalled = false;
 const hooked = [];
+let ttnetHooksInstalled = false;
+let nsurlHooksInstalled = false;
+
+const SIGN_HEADER_RE =
+    /gorgon|argus|ladon|khronos|helios|medusa|metasec|x-ss-stub|x-ss-req-ticket|x-tt-token|x-tt-dt|x-tt-multi|x-bd-kmsv|mstoken|x-vc-bdturing|x-ttnet-request|tt-request-time/i;
 
 function safeStr(v) {
     try {
@@ -73,19 +81,34 @@ function bytesToPreview(byteArray, totalLen, max) {
     }
 }
 
-function headersFrom(req) {
+function headersFromDict(all) {
     const out = {};
     try {
-        const all = req.allHTTPHeaderFields();
         if (!all || all.handle.isNull()) return out;
         const keys = all.allKeys();
         const count = Number(keys.count());
-        for (let i = 0; i < Math.min(count, 80); i++) {
+        for (let i = 0; i < Math.min(count, 100); i++) {
             const keyObj = keys.objectAtIndex_(i);
-            out[safeStr(keyObj)] = truncate(safeStr(all.objectForKey_(keyObj)), 800);
+            out[safeStr(keyObj)] = truncate(safeStr(all.objectForKey_(keyObj)), 1200);
         }
     } catch (_e) { /* ignore */ }
     return out;
+}
+
+function headersFromReq(req) {
+    try {
+        return headersFromDict(req.allHTTPHeaderFields());
+    } catch (_e) {
+        return {};
+    }
+}
+
+function headersFromResp(resp) {
+    try {
+        if (resp.allHeaderFields) return headersFromDict(resp.allHeaderFields());
+        if (resp.allHTTPHeaderFields) return headersFromDict(resp.allHTTPHeaderFields());
+    } catch (_e) { /* */ }
+    return {};
 }
 
 function bodyFromData(data) {
@@ -110,6 +133,38 @@ function bodyFromReq(req) {
     }
 }
 
+function extractSignHeaders(headers) {
+    if (!headers) return undefined;
+    const sign = {};
+    const keys = Object.keys(headers);
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        if (SIGN_HEADER_RE.test(k)) sign[k] = headers[k];
+    }
+    return Object.keys(sign).length ? sign : undefined;
+}
+
+function parseQueryParams(url) {
+    try {
+        const q = {};
+        const i = url.indexOf('?');
+        if (i < 0) return undefined;
+        const qs = url.slice(i + 1);
+        const parts = qs.split('&');
+        for (let p = 0; p < Math.min(parts.length, 80); p++) {
+            const part = parts[p];
+            if (!part) continue;
+            const eq = part.indexOf('=');
+            const k = decodeURIComponent(eq >= 0 ? part.slice(0, eq) : part);
+            const v = decodeURIComponent(eq >= 0 ? part.slice(eq + 1) : '');
+            q[k] = truncate(v, 400);
+        }
+        return Object.keys(q).length ? q : undefined;
+    } catch (_e) {
+        return undefined;
+    }
+}
+
 function responseMeta(response) {
     const meta = {};
     if (!response || response.isNull()) return meta;
@@ -117,20 +172,15 @@ function responseMeta(response) {
         const r = new ObjC.Object(response);
         try { meta.status = Number(r.statusCode()); } catch (_e) { /* */ }
         try { meta.mimeType = safeStr(r.MIMEType()); } catch (_e) { /* */ }
-        try {
-            const rh = r.allHeaderFields && r.allHeaderFields();
-            if (rh && !rh.handle.isNull()) {
-                const h = {};
-                const keys = rh.allKeys();
-                for (let i = 0; i < Math.min(Number(keys.count()), 80); i++) {
-                    const keyObj = keys.objectAtIndex_(i);
-                    h[safeStr(keyObj)] = truncate(safeStr(rh.objectForKey_(keyObj)), 800);
-                }
-                meta.responseHeaders = h;
-            }
-        } catch (_e) { /* */ }
+        try { meta.responseHeaders = headersFromResp(r); } catch (_e) { /* */ }
     } catch (_e) { /* */ }
     return meta;
+}
+
+function modeIncludes(layer) {
+    const m = String(opts.captureMode || 'all').toLowerCase();
+    if (m === 'all') return true;
+    return m === layer;
 }
 
 function pushEntry(entry) {
@@ -141,11 +191,11 @@ function pushEntry(entry) {
             if (!re.test(entry.url || '')) return;
         } catch (_e) { /* ignore */ }
     }
-    // de-dupe burst of identical url within 80ms
     const last = entries[entries.length - 1];
     if (
         last &&
         last.phase === entry.phase &&
+        last.stack === entry.stack &&
         last.url === entry.url &&
         last.method === entry.method &&
         Date.now() - last.ts < 80
@@ -154,6 +204,15 @@ function pushEntry(entry) {
     }
     entry.id = ++seq;
     entry.ts = Date.now();
+    if (entry.headers && !entry.signHeaders) {
+        entry.signHeaders = extractSignHeaders(entry.headers);
+    }
+    if (entry.requestHeaders && !entry.signHeaders) {
+        entry.signHeaders = extractSignHeaders(entry.requestHeaders);
+    }
+    if (entry.url && !entry.query) {
+        entry.query = parseQueryParams(entry.url);
+    }
     entries.push(entry);
     while (entries.length > MAX_ENTRIES) entries.shift();
     try {
@@ -162,25 +221,27 @@ function pushEntry(entry) {
             entry: {
                 id: entry.id,
                 phase: entry.phase,
+                stack: entry.stack,
                 method: entry.method,
                 url: entry.url,
                 status: entry.status,
+                hasSign: !!entry.signHeaders,
             },
         });
     } catch (_e) { /* */ }
 }
 
-function captureFromRequest(req, api) {
+function captureFromRequest(req, api, stack) {
     try {
         const url = safeStr(req.URL() && req.URL().absoluteString());
         const method = safeStr(req.HTTPMethod() || 'GET');
-        const headers = headersFrom(req);
+        const headers = headersFromReq(req);
         const body = bodyFromReq(req);
-        const base = { method, url, headers, body, api };
-        pushEntry({ phase: 'request', method, url, headers, body, api });
+        const base = { method, url, headers, body, api, stack };
+        pushEntry({ phase: 'request', method, url, headers, body, api, stack });
         return base;
     } catch (_e) {
-        return { method: '?', url: '', headers: {}, body: null, api };
+        return { method: '?', url: '', headers: {}, body: null, api, stack };
     }
 }
 
@@ -198,6 +259,7 @@ function wrapCompletion(origBlockPtr, base) {
                 try {
                     const entry = {
                         phase: 'response',
+                        stack: 'nsurl',
                         method: base.method,
                         url: base.url,
                         requestHeaders: base.headers,
@@ -230,67 +292,54 @@ function wrapCompletion(origBlockPtr, base) {
     }
 }
 
-function tryHook(name, selector, onEnter) {
+function tryHookNsurl(name, selector, onEnter) {
     try {
         const NSURLSession = ObjC.classes.NSURLSession;
         const method = NSURLSession[selector];
-        if (!method || !method.implementation) {
-            return false;
-        }
+        if (!method || !method.implementation) return false;
         Interceptor.attach(method.implementation, { onEnter });
-        hooked.push(name);
+        hooked.push('nsurl:' + name);
         return true;
     } catch (_e) {
         return false;
     }
 }
 
-function installHooks() {
-    if (hooksInstalled) return { ok: true, already: true, hooked: hooked.slice() };
+function installNsurlHooks() {
+    if (nsurlHooksInstalled) return { ok: true, already: true };
     if (!ObjC.available) return { ok: false, error: 'ObjC not available' };
     if (!ObjC.classes.NSURLSession) return { ok: false, error: 'NSURLSession missing' };
 
-    // Prefer request-path hooks only (stable). Avoid Task.resume reentrancy.
-    tryHook('dataTaskWithRequest:completionHandler:', '- dataTaskWithRequest:completionHandler:', function (args) {
-        if (!enabled) return;
+    tryHookNsurl('dataTaskWithRequest:completionHandler:', '- dataTaskWithRequest:completionHandler:', function (args) {
+        if (!enabled || !modeIncludes('nsurl')) return;
         try {
             const req = new ObjC.Object(args[2]);
-            const base = captureFromRequest(req, 'dataTaskWithRequest:completionHandler:');
-            if (opts.captureResponse) {
-                args[3] = wrapCompletion(args[3], base);
-            }
+            const base = captureFromRequest(req, 'dataTaskWithRequest:completionHandler:', 'nsurl');
+            if (opts.captureResponse) args[3] = wrapCompletion(args[3], base);
         } catch (_e) { /* */ }
     });
 
-    tryHook('dataTaskWithRequest:', '- dataTaskWithRequest:', function (args) {
-        if (!enabled) return;
+    tryHookNsurl('dataTaskWithRequest:', '- dataTaskWithRequest:', function (args) {
+        if (!enabled || !modeIncludes('nsurl')) return;
         try {
             const req = new ObjC.Object(args[2]);
-            captureFromRequest(req, 'dataTaskWithRequest:');
+            captureFromRequest(req, 'dataTaskWithRequest:', 'nsurl');
         } catch (_e) { /* */ }
     });
 
-    tryHook('dataTaskWithURL:completionHandler:', '- dataTaskWithURL:completionHandler:', function (args) {
-        if (!enabled) return;
+    tryHookNsurl('dataTaskWithURL:completionHandler:', '- dataTaskWithURL:completionHandler:', function (args) {
+        if (!enabled || !modeIncludes('nsurl')) return;
         try {
             const urlObj = new ObjC.Object(args[2]);
             const url = safeStr(urlObj.absoluteString && urlObj.absoluteString());
-            const base = {
-                method: 'GET',
-                url,
-                headers: {},
-                body: null,
-                api: 'dataTaskWithURL:completionHandler:',
-            };
+            const base = { method: 'GET', url, headers: {}, body: null, api: 'dataTaskWithURL:completionHandler:', stack: 'nsurl' };
             pushEntry({ phase: 'request', ...base });
-            if (opts.captureResponse) {
-                args[3] = wrapCompletion(args[3], base);
-            }
+            if (opts.captureResponse) args[3] = wrapCompletion(args[3], base);
         } catch (_e) { /* */ }
     });
 
-    tryHook('dataTaskWithURL:', '- dataTaskWithURL:', function (args) {
-        if (!enabled) return;
+    tryHookNsurl('dataTaskWithURL:', '- dataTaskWithURL:', function (args) {
+        if (!enabled || !modeIncludes('nsurl')) return;
         try {
             const urlObj = new ObjC.Object(args[2]);
             const url = safeStr(urlObj.absoluteString && urlObj.absoluteString());
@@ -301,45 +350,146 @@ function installHooks() {
                 headers: {},
                 body: null,
                 api: 'dataTaskWithURL:',
+                stack: 'nsurl',
             });
         } catch (_e) { /* */ }
     });
 
-    tryHook(
+    tryHookNsurl(
         'uploadTaskWithRequest:fromData:completionHandler:',
         '- uploadTaskWithRequest:fromData:completionHandler:',
         function (args) {
-            if (!enabled) return;
+            if (!enabled || !modeIncludes('nsurl')) return;
             try {
                 const req = new ObjC.Object(args[2]);
-                const base = captureFromRequest(req, 'uploadTaskWithRequest:fromData:completionHandler:');
+                const base = captureFromRequest(req, 'uploadTaskWithRequest:fromData:completionHandler:', 'nsurl');
                 try {
                     if (!base.body && args[3] && !args[3].isNull()) {
                         base.body = bodyFromData(new ObjC.Object(args[3]));
                     }
                 } catch (_e) { /* */ }
-                if (opts.captureResponse) {
-                    args[4] = wrapCompletion(args[4], base);
-                }
+                if (opts.captureResponse) args[4] = wrapCompletion(args[4], base);
             } catch (_e) { /* */ }
         },
     );
 
-    if (hooked.length === 0) {
-        return { ok: false, error: 'No NSURLSession methods hooked' };
+    nsurlHooksInstalled = true;
+    return { ok: true, already: false };
+}
+
+function tryHookTtnet(cls, name, selector, callbacks) {
+    try {
+        const method = cls[selector];
+        if (!method || !method.implementation) return false;
+        Interceptor.attach(method.implementation, callbacks);
+        hooked.push('ttnet:' + name);
+        return true;
+    } catch (_e) {
+        return false;
+    }
+}
+
+function installTtnetHooks() {
+    if (ttnetHooksInstalled) return { ok: true, already: true, present: true };
+    if (!ObjC.available) return { ok: false, error: 'ObjC not available' };
+
+    const C = ObjC.classes.TTHttpTaskChromium;
+    const R = ObjC.classes.TTHttpRequest;
+    if (!C) {
+        return { ok: true, present: false, note: 'TTHttpTaskChromium not in this process' };
     }
 
+    // Capture AFTER request filters — signed / token headers are usually present here.
+    // Do not also hook resume (would double-count the same request).
+    tryHookTtnet(C, 'runRequestFiltersAndStart', '- runRequestFiltersAndStart', {
+        onEnter(args) {
+            this._self = new ObjC.Object(args[0]);
+        },
+        onLeave(_retval) {
+            if (!enabled || !modeIncludes('ttnet')) return;
+            try {
+                const req = this._self.request();
+                if (!req || req.handle.isNull()) return;
+                captureFromRequest(req, 'TTHttpTaskChromium.runRequestFiltersAndStart', 'ttnet');
+            } catch (_e) { /* */ }
+        },
+    });
+
+    if (R) {
+        const headerSels = [
+            '- awenf_setValue:forHTTPHeaderField:',
+            '- tspk_util_setValue:forHTTPHeaderField:',
+        ];
+        for (let i = 0; i < headerSels.length; i++) {
+            const sel = headerSels[i];
+            tryHookTtnet(R, sel, sel, {
+                onEnter(args) {
+                    if (!enabled || !modeIncludes('ttnet')) return;
+                    try {
+                        const value = safeStr(new ObjC.Object(args[2]));
+                        const field = safeStr(new ObjC.Object(args[3]));
+                        if (!SIGN_HEADER_RE.test(field)) return;
+                        pushEntry({
+                            phase: 'sign_header',
+                            stack: 'ttnet',
+                            api: 'TTHttpRequest' + sel,
+                            method: 'SET',
+                            url: '',
+                            field,
+                            value: truncate(value, 1200),
+                            headers: { [field]: truncate(value, 1200) },
+                            signHeaders: { [field]: truncate(value, 1200) },
+                        });
+                    } catch (_e) { /* */ }
+                },
+            });
+        }
+    }
+
+    ttnetHooksInstalled = true;
+    return { ok: true, present: true, already: false };
+}
+
+function installHooks() {
+    if (hooksInstalled) {
+        return {
+            ok: true,
+            already: true,
+            hooked: hooked.slice(),
+            nsurl: nsurlHooksInstalled,
+            ttnet: ttnetHooksInstalled,
+        };
+    }
+    const ns = installNsurlHooks();
+    const tt = installTtnetHooks();
+    if (!ns.ok && !tt.ok) {
+        return { ok: false, error: (ns.error || '') + ' ' + (tt.error || '') };
+    }
+    if (hooked.length === 0 && !tt.present) {
+        return { ok: false, error: 'No network hooks installed' };
+    }
     hooksInstalled = true;
-    return { ok: true, already: false, hooked: hooked.slice() };
+    return {
+        ok: true,
+        already: false,
+        hooked: hooked.slice(),
+        nsurl: ns,
+        ttnet: tt,
+    };
+}
+
+function normalizeMode(v) {
+    const m = String(v == null ? 'all' : v).toLowerCase();
+    if (m === 'nsurl' || m === 'ttnet' || m === 'all') return m;
+    return 'all';
 }
 
 export function netEnable(options) {
-    // Each enable rebuilds opts from defaults then applies provided fields.
-    // Prevents stale urlFilter when caller only changes maxBody.
     const next = {
         maxBody: 4096,
         captureResponse: false,
         urlFilter: '',
+        captureMode: 'all',
     };
     if (options && typeof options === 'object') {
         if (options.maxBody != null) {
@@ -348,9 +498,11 @@ export function netEnable(options) {
         if (options.captureResponse != null) {
             next.captureResponse = !!options.captureResponse;
         }
-        // urlFilter: any provided value (including "") replaces; omit → default ""
         if (Object.prototype.hasOwnProperty.call(options, 'urlFilter')) {
             next.urlFilter = String(options.urlFilter == null ? '' : options.urlFilter);
+        }
+        if (Object.prototype.hasOwnProperty.call(options, 'captureMode')) {
+            next.captureMode = normalizeMode(options.captureMode);
         }
     }
     opts = next;
@@ -363,9 +515,15 @@ export function netEnable(options) {
         hooksInstalled: true,
         hooked: r.hooked || hooked.slice(),
         opts: Object.assign({}, opts),
+        layers: {
+            nsurl: nsurlHooksInstalled,
+            ttnet: ttnetHooksInstalled,
+            ttnetPresent: !!(ObjC.classes && ObjC.classes.TTHttpTaskChromium),
+        },
         note:
-            'In-process NSURLSession only. Each net_enable resets opts (urlFilter defaults to empty). ' +
-            'Pass urlFilter each time you need filtering. captureResponse default false.',
+            'captureMode=nsurl|ttnet|all. TTNet = TikTok Cronet (TTHttpTaskChromium) after filters. ' +
+            'captureResponse only wraps NSURLSession (TTNet response hooks unstable). ' +
+            'Use net_dump({redact:false, dedupe:false}) for reverse-engineering.',
     };
 }
 
@@ -388,6 +546,11 @@ export function netStatus() {
         opts: Object.assign({}, opts),
         hooked: hooked.slice(),
         maxEntries: MAX_ENTRIES,
+        layers: {
+            nsurl: nsurlHooksInstalled,
+            ttnet: ttnetHooksInstalled,
+            ttnetPresent: !!(ObjC.classes && ObjC.classes.TTHttpTaskChromium),
+        },
     };
 }
 
@@ -397,7 +560,17 @@ export function netDump(options) {
     let list = entries.slice();
     if (query) {
         list = list.filter((e) => {
-            const blob = [e.url, e.method, e.api, e.phase, e.error, String(e.status || '')]
+            const blob = [
+                e.url,
+                e.method,
+                e.api,
+                e.phase,
+                e.stack,
+                e.field,
+                e.error,
+                String(e.status || ''),
+                e.signHeaders ? JSON.stringify(e.signHeaders) : '',
+            ]
                 .join(' ')
                 .toLowerCase();
             return blob.includes(query);

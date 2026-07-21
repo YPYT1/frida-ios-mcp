@@ -167,6 +167,9 @@ export function quietNetEntry(
     if (out.responseHeaders && typeof out.responseHeaders === "object") {
       out.responseHeaders = redactHeaders(out.responseHeaders as Record<string, unknown>);
     }
+    if (out.signHeaders && typeof out.signHeaders === "object") {
+      out.signHeaders = redactHeaders(out.signHeaders as Record<string, unknown>);
+    }
   }
 
   const h = (out.headers ?? out.requestHeaders ?? hdrs) as Record<string, unknown> | undefined;
@@ -222,7 +225,9 @@ export function quietNetDump(
     if (dedupe) {
       const method = String(q.method ?? e.method ?? "").toUpperCase();
       const u = String(q.url ?? url);
-      const key = `${method} ${u}`;
+      const stack = String(q.stack ?? e.stack ?? "");
+      const phase = String(q.phase ?? e.phase ?? "");
+      const key = `${stack}|${phase}|${method} ${u}`;
       if (seen.has(key)) {
         deduped++;
         continue;

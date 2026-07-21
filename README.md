@@ -310,7 +310,7 @@ FRIDA_MCP_MODE = "daemon"
 | `rpc_call` | whitelisted agent RPC (`[debug]`; on by default in `all`, hide with `ALLOW_DEBUG_TOOLS=0`) |
 | `process_list` | device processes (pid/name) |
 | `sb_alert_trigger` / `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
-| `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession capture (TLS plaintext after app decrypt) |
+| `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession + TTNet/Cronet capture (TLS plaintext after app decrypt) |
 
 Refs expire after `tap`/`swipe` and across snapshot generations. Off-screen / zero-size nodes are marked and rejected on `tap`.
 
@@ -333,20 +333,24 @@ Agent: `agent/text_input/comment.js` (same approach as fleetcontrol).
 - Errors return `{ code, recovery[] }` (e.g. `SCRIPT_DESTROYED` → respawn).
 - Start probes with `probe_help`; prefer first-class tools over `[debug]` `rpc_call` (hide debug with `FRIDA_MCP_ALLOW_DEBUG_TOOLS=0`).
 
-### Network capture
+### Network capture (reverse-engineering)
 
 ```text
 # Best: capture launch traffic (hooks before resume)
-session_open { bundleId, mode:"spawn", captureNet:true } → wait → net_dump
+session_open { bundleId, captureNet:true, netOptions:{ captureMode:"all", maxBody:16384 } }
+  → wait_until_texts / use app → net_dump({ redact:false, dedupe:false, query:"tiktokv" })
 
-# Or enable later
-session_open → net_enable({ urlFilter?: "api\\." }) → wait / use app → net_dump → net_disable
+# TTNet-only (TikTok business APIs)
+net_enable({ captureMode:"ttnet", maxBody:16384 }) → … → net_dump({ redact:false, dedupe:false })
 ```
 
-- **Scope:** only the injected process (not system-wide MITM).
-- **Sees:** `NSURLSession` request URL/method/headers/body preview.
-- **Default:** `captureResponse=false` (request-only, stable). Response wrapping can kill scripts on some apps.
-- **Does not see:** pure native sockets / custom TLS that skip `NSURLSession` (some SDKs/CDNs).
+- **Scope:** injected process only (not system-wide MITM).
+- **`captureMode`:** `nsurl` (SDK/`NSURLSession`) | `ttnet` (TikTok `TTHttpTaskChromium` after request filters) | `all` (default).
+- **Sees (ttnet):** `api.tiktokv.com` / `aweme` URLs, method, headers (incl. `x-Tt-Token` etc.), `signHeaders` extract, URL `query`, body preview.
+- **Sees (nsurl):** SnapKit / AppsFlyer / other `NSURLSession` traffic.
+- **Default:** `captureResponse=false` (request-only). NSURLSession response wrap is optional; TTNet response hooks are not enabled (unstable / kill scripts).
+- **RE dump tip:** `redact:false`, `dedupe:false`, `includeBinaryBodies:true`, `query:"tiktokv"` or `query:"sign_header"`.
+- **Gap:** headers applied only inside native Cronet after ObjC filters may still be missing; not a full packet MITM.
 
 ## NSSM (only after device tools work)
 

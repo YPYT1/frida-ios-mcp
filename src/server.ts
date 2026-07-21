@@ -104,7 +104,7 @@ export function createMcpServer(): McpServer {
       "mode=attach is ignored/forced to spawn unless FRIDA_MCP_ALLOW_ATTACH=1 (unreliable: touch/net).",
       "TikTok: after open, wait 3–5s before screen_snapshot. Never dump_tree/find_view.",
       "spawn restarts the process (login UI state may reset).",
-      "captureNet=true installs NSURLSession hooks before resume (launch traffic).",
+      "captureNet=true installs NSURLSession + TTNet hooks before resume (launch traffic).",
       "withSpringBoard=true attaches SpringBoard in parallel (dual inject; App+SB concurrent RPCs).",
     ].join(" "),
     {
@@ -117,7 +117,7 @@ export function createMcpServer(): McpServer {
       captureNet: z
         .boolean()
         .optional()
-        .describe("If true, enable NSURLSession capture before resume (spawn)"),
+        .describe("If true, enable NSURLSession+TTNet capture before resume (spawn)"),
       withSpringBoard: z
         .boolean()
         .optional()
@@ -127,6 +127,10 @@ export function createMcpServer(): McpServer {
           maxBody: z.number().optional(),
           captureResponse: z.boolean().optional(),
           urlFilter: z.string().optional(),
+          captureMode: z
+            .enum(["nsurl", "ttnet", "all"])
+            .optional()
+            .describe("nsurl | ttnet | all (default all)"),
         })
         .optional(),
     },
@@ -574,23 +578,28 @@ export function createMcpServer(): McpServer {
   reg(
     "net_enable",
     [
-      "Start NSURLSession capture in current app (TLS plaintext after app decrypt).",
-      "Each call RESETS opts (urlFilter defaults empty — pass urlFilter every time you need it).",
-      "Needs device network for real traffic. Typical: enable → wait/use app → net_dump.",
+      "Start in-process HTTP capture. captureMode: nsurl | ttnet | all (default all).",
+      "ttnet hooks TikTok TTHttpTaskChromium AFTER request filters (api.tiktokv.com + headers/sign fields).",
+      "captureResponse wraps NSURLSession only (unstable on TikTok if set at spawn — prefer request-only).",
+      "Each call RESETS opts. Typical RE: session_open({captureNet:true}) → use app → net_dump({redact:false,dedupe:false,query:\"tiktokv\"}).",
     ].join(" "),
     {
       maxBody: z.number().optional().describe("Max body preview bytes, default 4096"),
       captureResponse: z
         .boolean()
         .optional()
-        .describe("Default false (more stable)"),
+        .describe("NSURLSession response wrap only; default false"),
       urlFilter: z
         .string()
         .optional()
         .describe("URL regex; omitted/empty = capture all. Not sticky across enables."),
+      captureMode: z
+        .enum(["nsurl", "ttnet", "all"])
+        .optional()
+        .describe("nsurl | ttnet | all (default all)"),
     },
-    async ({ maxBody, captureResponse, urlFilter }) =>
-      toolResult(await run("net_enable", { maxBody, captureResponse, urlFilter })),
+    async ({ maxBody, captureResponse, urlFilter, captureMode }) =>
+      toolResult(await run("net_enable", { maxBody, captureResponse, urlFilter, captureMode })),
   );
 
   reg(
@@ -617,8 +626,9 @@ export function createMcpServer(): McpServer {
   reg(
     "net_dump",
     [
-      "Quiet HTTP dump. rawCount=buffer; returned(=count)=entries after filter; droppedDataUrls/foldedBinaryBodies/deduped=stats.",
-      "Default: redact, DROP data: URLs, FOLD binary, dedupe method+url (keep first; dedupe:false for retry/replay debug). summaryOnly=host counts.",
+      "Quiet HTTP dump. Entries may include stack=nsurl|ttnet, signHeaders, query.",
+      "rawCount=buffer; returned(=count)=entries after filter. Default: redact, DROP data: URLs, FOLD binary, dedupe method+url.",
+      "RE tip: redact:false dedupe:false query:\"tiktokv\" or query:\"sign_header\". summaryOnly=host counts.",
     ].join(" "),
     {
       limit: z.number().optional().describe("Max entries, default 50"),

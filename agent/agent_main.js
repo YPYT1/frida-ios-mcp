@@ -60,7 +60,7 @@ rpc.exports = {
     // --- OTP 输入（TikTok TMVerificationCodeInputView + TUXPinField）---
     setOtpCode: (code, source)           => setOtpCode(code, source),
 
-    // --- 网络捕获（NSURLSession，进程内明文/解密后）---
+    // --- 网络捕获（NSURLSession + TTNet/Cronet，进程内明文/解密后）---
     netEnable:  (options)                => netEnable(options || {}),
     netDisable: ()                       => netDisable(),
     netClear:   ()                       => netClear(),

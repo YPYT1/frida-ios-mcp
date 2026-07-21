@@ -112,6 +112,7 @@ export async function handleMethod(
                 maxBody?: number;
                 captureResponse?: boolean;
                 urlFilter?: string;
+                captureMode?: string;
               })
             : undefined;
         const r = await sessionStore.open({
@@ -429,6 +430,8 @@ export async function handleMethod(
             params.captureResponse != null ? Boolean(params.captureResponse) : undefined,
           urlFilter:
             typeof params.urlFilter === "string" ? params.urlFilter : undefined,
+          captureMode:
+            typeof params.captureMode === "string" ? params.captureMode : undefined,
         });
         return jsonResult(r);
       }

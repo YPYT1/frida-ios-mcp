@@ -490,6 +490,8 @@ class SessionStore {
       maxBody?: number;
       captureResponse?: boolean;
       urlFilter?: string;
+      /** nsurl | ttnet | all — TikTok business APIs need ttnet/all */
+      captureMode?: string;
     };
     /**
      * If true, attach SpringBoard in parallel with app open (dual inject ready).
@@ -610,7 +612,8 @@ class SessionStore {
                     net = await callRpc(script, "netEnable", [
                       {
                         captureResponse: false,
-                        maxBody: 2048,
+                        maxBody: 8192,
+                        captureMode: "all",
                         ...(opts.netOptions ?? {}),
                       },
                     ]);
@@ -633,7 +636,8 @@ class SessionStore {
               net = await callRpc(this.live.script, "netEnable", [
                 {
                   captureResponse: false,
-                  maxBody: 2048,
+                  maxBody: 8192,
+                  captureMode: "all",
                   ...(opts.netOptions ?? {}),
                 },
               ]);
@@ -701,7 +705,7 @@ class SessionStore {
     }
     if (opts.captureNet) {
       warnings.push(
-        "Network capture enabled (NSURLSession). Prefer captureNet with spawn so hooks are live before resume.",
+        "Network capture enabled (NSURLSession + TTNet/Cronet). Prefer captureNet with spawn so hooks are live before resume. TikTok APIs: net_dump({query:\"tiktokv\", redact:false, dedupe:false}).",
       );
     }
 
@@ -2021,6 +2025,7 @@ class SessionStore {
     maxBody?: number;
     captureResponse?: boolean;
     urlFilter?: string;
+    captureMode?: string;
   } = {}): Promise<unknown> {
     return this.rpc("netEnable", [options]);
   }
