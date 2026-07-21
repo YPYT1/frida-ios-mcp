@@ -17,10 +17,62 @@ Independent of `fleetcontrol` (agent JS copied under `agent/`).
 | Node.js | ≥ 22 |
 | pnpm | 9+ |
 | npm `frida` | 17.x (this repo pins `^17.16.2`) |
-| iOS `frida-server` | **same major**, e.g. **17.9.1** / 17.x |
+| iOS `frida-server` | **same major** as host npm `frida` (e.g. both 17.x) |
 | USB | MVP: native USB only (no wecha TCP yet) |
+| Python (media only) | 3.x + `pymobiledevice3` via `FRIDA_MCP_PYTHON` |
 
-Mismatch between host `frida` and phone `frida-server` → inject fails.
+Mismatch between host `frida` and phone `frida-server` → inject / `session_open` fails.
+
+## Device prerequisites（手机必须先具备）
+
+本 MCP **只适用于已越狱的 iPhone**。未越狱、未跑 `frida-server` 时，`device_list` 可能仍能看到 USB，但 **无法注入 / 无法触摸 / 无法读 UI**。
+
+### 1. 越狱环境（已验证方向）
+
+| 环境 | 说明 |
+|------|------|
+| **多巴胺 (Dopamine)** | 常用；可配合 RootHide。本仓库默认 **spawn-only** 路径就是为这类环境准备的 |
+| **水滴 / Serotonin 系** | 同样需要设备上常驻或手动启动匹配版本的 `frida-server` |
+| **RootHide** | 推荐开：降低 TikTok 等对注入痕迹的风控；**不要**指望 `attach` 已运行进程（触摸常 `_touchesEvent=null`） |
+
+不支持：未越狱设备、仅开发者模式、仅 `pymobiledevice3` 无 Frida、远程 TCP Frida（当前 MVP 未做）。
+
+### 2. 手机上必须运行 `frida-server`
+
+1. 从 [Frida releases](https://github.com/frida/frida/releases) 下载与电脑端 **同一大版本** 的 `frida-server`（例：电脑 `frida@17.16.x` → 手机也用 17.x）。
+2. 推到设备并赋予执行权限（路径因越狱不同，常见 `/var/jb/usr/sbin/frida-server` 或 `/usr/sbin/frida-server`）。
+3. **以 root 启动并保持运行**，例如：
+
+```bash
+# 在手机终端 / SSH（示例，按你的实际路径改）
+sudo frida-server -D
+# 或前台调试：
+sudo frida-server
+```
+
+4. PC 侧自检：
+
+```bash
+pnpm cli call device_list
+# 或
+npx frida-ps -U
+```
+
+能列出 USB 设备 / 进程，再开 MCP。`frida-server` 一停，后续 `session_open` 会失败或挂死。
+
+### 3. 电脑侧依赖
+
+- Node ≥ 22，本仓库 `pnpm install && pnpm build`
+- USB 数据线直连（信任电脑）
+- 相册导入另需：装有 `pymobiledevice3` 的 Python，并用 `FRIDA_MCP_PYTHON` 指到该解释器
+
+### 4. TikTok / 触摸铁律
+
+| 做法 | 结果 |
+|------|------|
+| `session_open`（默认 spawn：杀进程 → 挂起注入 → resume） | 触摸可靠 |
+| `attach` 已在前台的 TikTok | **不可靠**（默认禁止；`FRIDA_MCP_ALLOW_ATTACH=1` 仅逃生） |
+| 启动后立刻 `dump_tree` / Accessibility 爬树 | 易触发反调试；本 MCP 用安全文字收集 |
 
 ### Spawn-only (this device stack)
 

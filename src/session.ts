@@ -1614,18 +1614,48 @@ class SessionStore {
   private looksLikeNonInputLabel(label: string): boolean {
     const t = label.trim();
     if (!t) return false;
-    // Short nav / tab / CTA labels
+    // Short nav / tab / CTA labels.
+    // Note: empty SearchBar placeholder is often literally「搜尋」— that case is handled
+    // in smartType via likelyInput / SearchBar class (do not reject those refs here alone).
     if (
-      /^(首頁|好友|收信匣|個人資料|發佈|關注中|為您推薦|搜尋|搜索|取消|完成|發送|发佈|一般|設定|设置|Wi-Fi|藍牙|通知|猜您喜歡|熱門搜尋|熱門直播|爆紅歌曲|重新整理|剛剛看過|高度活躍|當地熱門話題|進行中活動)$/i.test(
+      /^(首頁|好友|收信匣|個人資料|發佈|關注中|為您推薦|取消|完成|發送|发佈|一般|設定|设置|Wi-Fi|藍牙|通知|猜您喜歡|熱門搜尋|熱門直播|爆紅歌曲|重新整理|剛剛看過|高度活躍|當地熱門話題|進行中活動)$/i.test(
         t,
       )
     ) {
       return true;
     }
+    // Narrow「搜尋」button on the right (not the bar) — still chrome
+    if (/^(搜尋|搜索|Search|検索)$/i.test(t)) {
+      return true; // overridden below when likelyInput / wide / SearchBar class
+    }
     // Feed status / prompt chips (not real UITextField)
     if (/有什麼|有什么|好事|说点什么|說點什麼|添加评论|新增留言/i.test(t) && t.length <= 24) {
       return true;
     }
+    return false;
+  }
+
+  /** True when snapshot/class says this is the real search/composer field. */
+  private isRealInputNode(n: {
+    text: string;
+    w: number;
+    h: number;
+    cy: number;
+    likelyInput?: boolean;
+    className?: string;
+  }): boolean {
+    if (n.likelyInput) return true;
+    const cls = (n.className || "").toLowerCase();
+    if (
+      cls.includes("searchbar") ||
+      cls.includes("uitextfield") ||
+      cls.includes("textfield") ||
+      cls.includes("uitextview")
+    ) {
+      return true;
+    }
+    // Wide top search bar geometry even without class
+    if (n.cy < 78 && n.w >= 160 && n.h >= 28 && n.h <= 56) return true;
     return false;
   }
 
@@ -1702,7 +1732,9 @@ class SessionStore {
     let tapMeta: Record<string, unknown> = {};
     if (opts.ref) {
       const n = this.resolveRef(opts.ref);
-      if (this.looksLikeNonInputLabel(n.text)) {
+      const realInput = this.isRealInputNode(n);
+      // Narrow right-side「搜尋」button: chrome. Empty bar placeholder「搜尋」+ [input]: allow.
+      if (this.looksLikeNonInputLabel(n.text) && !realInput) {
         throw new ProbeError(
           "NOT_INPUT",
           `ref ${opts.ref} text ${JSON.stringify(n.text)} looks like chrome/chip, not a text field. Do not smart_type it.`,
@@ -1713,8 +1745,18 @@ class SessionStore {
           ],
         );
       }
-      tapX = n.cx;
-      tapY = n.cy;
+      // Empty SearchBar often exposes a narrow placeholder label; tap mid-bar instead.
+      if (
+        realInput &&
+        /^(搜尋|搜索|Search|検索)$/i.test(n.text.trim()) &&
+        n.w < 120
+      ) {
+        tapX = 200;
+        tapY = n.cy;
+      } else {
+        tapX = n.cx;
+        tapY = n.cy;
+      }
       tapMeta = { ref: n.ref, label: n.text, className: n.className };
     } else {
       tapX = opts.x!;
