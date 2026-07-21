@@ -123,8 +123,18 @@ export const RPC_CALL_WHITELIST = new Set([
   "im_status",
   "imListConversations",
   "im_list_conversations",
+  "imInboxMessages",
+  "im_inbox_messages",
   "imSendText",
   "im_send_text",
+  "imListMessages",
+  "im_list_messages",
+  "imOpenChat",
+  "im_open_chat",
+  "imOpenChatByPeerUid",
+  "im_open_chat_by_peer_uid",
+  "imConversationIdForPeer",
+  "im_conversation_id_for_peer",
   "userPhoneBindStatus",
   "user_phone_bind_status",
   "postsListSelf",
@@ -149,3 +159,4 @@ export function assertWhitelistedRpc(name: string): void {
     );
   }
 }
+

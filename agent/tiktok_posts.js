@@ -48,22 +48,30 @@ function parseAwemeList(bodyJson) {
     for (let i = 0; i < obj.aweme_list.length; i++) {
       const a = obj.aweme_list[i] || {};
       const stats = a.statistics || a.stats || {};
+      let shareUrl =
+        (a.share_info && (a.share_info.share_url || a.share_info.shareUrl)) ||
+        a.share_url ||
+        '';
+      shareUrl = String(shareUrl || '');
       let awemeId = String(a.aweme_id || a.awemeId || a.group_id || a.groupId || '');
-      if (!awemeId) {
-        const shareUrl =
-          (a.share_info && (a.share_info.share_url || a.share_info.shareUrl)) ||
-          a.share_url ||
-          '';
-        const um = String(shareUrl).match(/\/video\/(\d+)/);
+      if (!awemeId && shareUrl) {
+        const um = shareUrl.match(/\/video\/(\d+)/);
         if (um) awemeId = um[1];
       }
-      if (!awemeId && a.video && a.video.download_addr && a.video.download_addr.uri) {
-        // last resort — leave empty
+      if (!shareUrl && awemeId) {
+        const author =
+          (a.author && (a.author.unique_id || a.author.uniqueId || a.author.uid)) || '';
+        if (author) {
+          shareUrl = 'https://www.tiktok.com/@' + author + '/video/' + awemeId;
+        } else {
+          shareUrl = 'https://www.tiktok.com/video/' + awemeId;
+        }
       }
       items.push({
         awemeId,
         desc: String(a.desc || a.title || '').slice(0, 200),
         createTime: a.create_time || a.createTime || null,
+        shareUrl: shareUrl || null,
         stats: {
           digg: stats.digg_count || stats.diggCount || null,
           comment: stats.comment_count || stats.commentCount || null,
@@ -102,7 +110,13 @@ function parseAwemeList(bodyJson) {
     let createTime = null;
     const cm = slice.match(/"create_time"\s*:\s*(\d+)/);
     if (cm) createTime = Number(cm[1]);
-    items.push({ awemeId: id, desc, createTime, stats: {} });
+    items.push({
+      awemeId: id,
+      desc,
+      createTime,
+      shareUrl: 'https://www.tiktok.com/video/' + id,
+      stats: {},
+    });
     if (items.length >= 50) break;
   }
   return {

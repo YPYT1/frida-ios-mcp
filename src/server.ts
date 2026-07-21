@@ -674,23 +674,71 @@ export function createMcpServer(): McpServer {
   );
 
   reg(
+    "tiktok_inbox",
+    "Refresh TikTok Inbox plus Message Requests/notification entries without UI navigation. Returns username, content, conversationId, peerUid, and isMessageRequest.",
+    {
+      limit: z.number().optional().describe("Maximum inbox entries, default 20"),
+      onlyUnread: z.boolean().optional().describe("Exclude seen or self-sent latest messages"),
+      timeoutMs: z.number().optional().describe("Network refresh wait, default 1800, max 5000"),
+    },
+    async (args) => toolResult(await run("tiktok_inbox", args)),
+  );
+
+  reg(
+    "tiktok_reply",
+    "Reply through TikTok's real chat composer. With dryRun:false, opens the chat, types into ChatInputTextView, taps 傳送, and succeeds only after the exact text is re-read from live message models.",
+    {
+      conversationId: z.string().optional().describe("Conversation returned by tiktok_inbox"),
+      peerUid: z.string().optional().describe("Fallback for Message Requests without a conversationId"),
+      text: z.string().describe("Reply text"),
+      dryRun: z.boolean().optional().describe("Default true — set false to send a real reply"),
+      confirmTimeoutMs: z.number().optional().describe("Exact-text re-read timeout; default 15000, max 30000"),
+    },
+    async (args) => toolResult(await run("tiktok_reply", args)),
+  );
+
+  reg(
     "tiktok_im",
     [
-      "In-process TikTok IM. action: status | conversations | send_text | phone_status.",
-      "send_text defaults dryRun:true (constructs message+conversation only). Pass dryRun:false to really send.",
-      "conversationId from conversations or net_dump query:imapi|inbox. phone_status = AWEUserModel bind flags vs Add Phone popup.",
+      "In-process TikTok IM network runtime. action: status | conversations | inbox | send_text | messages | open_chat | peer_conversation | phone_status.",
+      "inbox refreshes normal chats and Message Requests/notification pages without UI navigation; returns username + newest content.",
+      "send_text defaults dryRun:true. With dryRun:false, transport defaults to the real chat composer and succeeds only after the exact text is re-read from live message models.",
+      "messages: peer nickname/content/time (best-effort). open_chat: open message VC. peer_conversation: build id from peerUid.",
     ].join(" "),
     {
       action: z
-        .enum(["status", "conversations", "send_text", "phone_status"])
+        .enum([
+          "status",
+          "conversations",
+          "inbox",
+          "send_text",
+          "messages",
+          "open_chat",
+          "peer_conversation",
+          "phone_status",
+        ])
         .describe("IM action"),
-      conversationId: z.string().optional().describe("Required for send_text"),
+      conversationId: z.string().optional().describe("Conversation id for send_text/messages/open_chat (or use peerUid)"),
       text: z.string().optional().describe("Message text for send_text"),
       dryRun: z
         .boolean()
         .optional()
-        .describe("Default true — do not call sendMessage unless false"),
-      limit: z.number().optional().describe("conversations limit, default 20"),
+        .describe("Default true — do not send unless false"),
+      transport: z
+        .enum(["network", "sdk"])
+        .optional()
+        .describe("send_text only: network/composer re-reads exact text (default); sdk is disabled because it created blank bubbles"),
+      confirmTimeoutMs: z
+        .number()
+        .optional()
+        .describe("send_text exact-text re-read timeout; default 15000, max 30000"),
+      limit: z.number().optional().describe("conversations/inbox/messages limit"),
+      onlyUnread: z.boolean().optional().describe("inbox only: omit seen or self-sent latest messages"),
+      timeoutMs: z.number().optional().describe("inbox/conversations network refresh wait; default 1800, max 5000"),
+      peerUid: z
+        .string()
+        .optional()
+        .describe("Peer uid you can message (mutual follow). Used by peer_conversation / send_text"),
     },
     async (args) => toolResult(await run("tiktok_im", args)),
   );
@@ -698,8 +746,8 @@ export function createMcpServer(): McpServer {
   reg(
     "tiktok_posts",
     [
-      "List current user's posts via in-process TTNet (App MetaSec signs). Returns awemeId/desc/createTime/stats.",
-      "Override url/userId if path differs; calibrate with net_dump query:aweme/post.",
+      "List current user's posts via in-process TTNet (App MetaSec signs).",
+      "Returns awemeId, desc, createTime, shareUrl, stats.",
     ].join(" "),
     {
       count: z.number().optional().describe("Page size, default 12"),
@@ -821,3 +869,5 @@ export function createMcpServer(): McpServer {
 
   return server;
 }
+
+

@@ -54,6 +54,8 @@ export const ADVANCED_TOOLS = [
   "net_clear",
   "net_status",
   "net_dump",
+  "tiktok_inbox",
+  "tiktok_reply",
   "tiktok_im",
   "tiktok_posts",
   "tiktok_sign",

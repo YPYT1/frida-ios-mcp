@@ -471,6 +471,35 @@ export async function handleMethod(
           text: typeof params.text === "string" ? params.text : undefined,
           dryRun: params.dryRun === false ? false : true,
           limit: params.limit != null ? Number(params.limit) : undefined,
+          peerUid: typeof params.peerUid === "string" ? params.peerUid : undefined,
+          onlyUnread: params.onlyUnread === true,
+          timeoutMs: params.timeoutMs != null ? Number(params.timeoutMs) : undefined,
+          transport:
+            params.transport === "sdk" || params.transport === "network"
+              ? params.transport
+              : undefined,
+          confirmTimeoutMs:
+            params.confirmTimeoutMs != null ? Number(params.confirmTimeoutMs) : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_inbox": {
+        const r = await sessionStore.tiktokInbox({
+          limit: params.limit != null ? Number(params.limit) : undefined,
+          onlyUnread: params.onlyUnread === true,
+          timeoutMs: params.timeoutMs != null ? Number(params.timeoutMs) : undefined,
+        });
+        return jsonResult(r);
+      }
+      case "tiktok_reply": {
+        const r = await sessionStore.tiktokReply({
+          conversationId:
+            typeof params.conversationId === "string" ? params.conversationId : undefined,
+          peerUid: typeof params.peerUid === "string" ? params.peerUid : undefined,
+          text: typeof params.text === "string" ? params.text : "",
+          dryRun: params.dryRun === false ? false : true,
+          confirmTimeoutMs:
+            params.confirmTimeoutMs != null ? Number(params.confirmTimeoutMs) : undefined,
         });
         return jsonResult(r);
       }

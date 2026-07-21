@@ -311,7 +311,7 @@ FRIDA_MCP_MODE = "daemon"
 | `process_list` | device processes (pid/name) |
 | `sb_alert_trigger` / `sb_alert_list` / `sb_alert_tap` / `sb_alert_dismiss` / `sb_close` | SpringBoard system alerts |
 | `net_enable` / `net_disable` / `net_clear` / `net_status` / `net_dump` | in-process NSURLSession + TTNet/Cronet capture (TLS plaintext after app decrypt) |
-| `tiktok_im` / `tiktok_posts` / `tiktok_sign` | IM (dryRun send) / self posts via TTNet / MetaSec sign I/O (advanced) |
+| `tiktok_inbox` / `tiktok_reply` / `tiktok_im` / `tiktok_posts` / `tiktok_sign` | Inbox+MR read / composer reply / IM advanced / self posts / MetaSec sign I/O |
 
 Refs expire after `tap`/`swipe` and across snapshot generations. Off-screen / zero-size nodes are marked and rejected on `tap`.
 
@@ -353,7 +353,10 @@ session_open {
 - **iOS sign headers (45.x):** `x-security-argus`, `x-Tt-Token`, `x-metasec-*`, ticket/device-guard — **classic `X-Gorgon` / `X-Argus` names are often absent** on this build.
 - **Responses:** `captureResponse:true` uses TTNet `onReadResponseData` + `setIsCompleted`. Do **not** hook `onURLFetchComplete` (kills script). Many JSON/IM payloads may still arrive empty via this path (protobuf/other channels); binary/CDN bodies usually populate. Prefer **ttnetRequest callback JSON** for posts/list APIs.
 - **DM / works URLs seen on device:** `imapi-*.tiktokv.com/v1/message/get_by_user`, `…/v2/message/get_by_user_init`, `tiktok/v1/im/inbox_data/get`, `aweme/v1/user/profile/self`, feed/post endpoints.
-- **IM send (`tiktok_im`):** `action: status | conversations | send_text | phone_status`. **`send_text` defaults `dryRun:true`** — constructs `AWEIMTextMessage` + `TIMOConversation` only; pass `dryRun:false` to call `sendMessage:conversation:`. Get `conversationId` from `conversations` or `net_dump query:imapi|inbox`.
+- **IM inbox/reply:**
+  - `tiktok_inbox` — refresh Inbox + Message Requests and return `username`, **real text** `content`, `conversationId`, `peerUid`.
+  - `tiktok_reply` / `tiktok_im send_text` — default `dryRun:true`. With `dryRun:false`, opens the real chat composer (`ChatInputTextView` + 傳送), and returns `sent:true` **only after the exact text is re-read** from live `AWEIMTextMessage` models (blank bubbles / network-callback-only success are rejected). `transport:"sdk"` is disabled.
+  - `tiktok_im action: messages` — list recent messages with real text when available; `open_chat` accepts `conversationId` or `peerUid`.
 - **Posts (`tiktok_posts`):** self post list via TTNet to `aweme/v1/aweme/post/` (override `url`/`userId` if needed).
 - **Add Phone popup attribution (no dedicated tool):**
   1. `session_open` with `captureNet` + reproduce the popup
@@ -368,7 +371,9 @@ session_open {
 
 | Tool | Purpose |
 |------|---------|
-| `tiktok_im` | IM status / list / dryRun send / phone bind status |
+| `tiktok_inbox` | Read Inbox + Message Requests/notification messages (username/content/conversation ID) |
+| `tiktok_reply` | Reply via real chat composer; succeeds only after exact text re-read |
+| `tiktok_im` | Advanced IM diagnostics / compatibility actions |
 | `tiktok_posts` | Self works list (in-app signed TTNet) |
 | `tiktok_sign` | `last` sign headers or `enable_trace` |
 ## NSSM (only after device tools work)
@@ -404,3 +409,4 @@ Logs: `logs/daemon.stdout.log`, `logs/daemon.stderr.log`
 ## License
 
 Private / internal use.
+

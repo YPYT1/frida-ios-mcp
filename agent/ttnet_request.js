@@ -109,6 +109,9 @@ function objcToJson(obj, maxDepth, maxLen) {
           'has_more',
           'share_info',
           'share_url',
+          'author',
+          'unique_id',
+          'uid',
         ];
         const keyStrs = [];
         for (let i = 0; i < n; i++) keyStrs.push(safeStr(keys.objectAtIndex_(i)));

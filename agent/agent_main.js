@@ -25,8 +25,13 @@ import { ttnetRequest, ttnetStatus } from './ttnet_request.js';
 import {
     imStatus,
     imListConversations,
+    imInboxMessages,
     imSendText,
     userPhoneBindStatus,
+    imListMessages,
+    imOpenChat,
+    imOpenChatByPeerUid,
+    imConversationIdForPeer,
 } from './tiktok_im.js';
 import { postsListSelf } from './tiktok_posts.js';
 
@@ -81,7 +86,12 @@ rpc.exports = {
     ttnetRequest: (options)              => ttnetRequest(options || {}),
     imStatus:     ()                     => imStatus(),
     imListConversations: (options)       => imListConversations(options || {}),
+    imInboxMessages: (options)           => imInboxMessages(options || {}),
     imSendText:   (options)              => imSendText(options || {}),
+    imListMessages: (options)            => imListMessages(options || {}),
+    imOpenChat:   (options)              => imOpenChat(options || {}),
+    imOpenChatByPeerUid: (options)       => imOpenChatByPeerUid(options || {}),
+    imConversationIdForPeer: (peerUid)   => imConversationIdForPeer(peerUid),
     userPhoneBindStatus: ()              => userPhoneBindStatus(),
     postsListSelf: (options)             => postsListSelf(options || {}),
 

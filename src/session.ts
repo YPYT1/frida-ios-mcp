@@ -2055,11 +2055,23 @@ class SessionStore {
     text?: string;
     dryRun?: boolean;
     limit?: number;
+    peerUid?: string;
+    onlyUnread?: boolean;
+    timeoutMs?: number;
+    transport?: "network" | "sdk";
+    confirmTimeoutMs?: number;
   }): Promise<unknown> {
     const action = String(options.action || "status").toLowerCase();
     if (action === "status") return this.rpc("imStatus");
     if (action === "conversations") {
-      return this.rpc("imListConversations", [{ limit: options.limit }]);
+      return this.rpc("imListConversations", [{ limit: options.limit, timeoutMs: options.timeoutMs }]);
+    }
+    if (action === "inbox") {
+      return this.rpc("imInboxMessages", [{
+        limit: options.limit,
+        onlyUnread: options.onlyUnread === true,
+        timeoutMs: options.timeoutMs,
+      }]);
     }
     if (action === "send_text") {
       return this.rpc("imSendText", [
@@ -2067,13 +2079,61 @@ class SessionStore {
           conversationId: options.conversationId,
           text: options.text,
           dryRun: options.dryRun !== false,
+          peerUid: options.peerUid,
+          transport: options.transport || "network",
+          confirmTimeoutMs: options.confirmTimeoutMs,
         },
       ]);
     }
+    if (action === "messages") {
+      return this.rpc("imListMessages", [
+        { conversationId: options.conversationId, limit: options.limit },
+      ]);
+    }
+    if (action === "open_chat") {
+      if (options.peerUid) {
+        return this.rpc("imOpenChatByPeerUid", [{ peerUid: options.peerUid }]);
+      }
+      return this.rpc("imOpenChat", [{ conversationId: options.conversationId }]);
+    }
+    if (action === "peer_conversation") {
+      return this.rpc("imConversationIdForPeer", [options.peerUid || ""]);
+    }
     if (action === "phone_status") return this.rpc("userPhoneBindStatus");
     throw new Error(
-      `tiktok_im unknown action "${options.action}". Use status|conversations|send_text|phone_status`,
+      `tiktok_im unknown action "${options.action}". Use status|conversations|inbox|send_text|messages|open_chat|peer_conversation|phone_status`,
     );
+  }
+
+  /** Read normal Inbox plus Message Requests without navigating TikTok UIKit. */
+  async tiktokInbox(options: {
+    limit?: number;
+    onlyUnread?: boolean;
+    timeoutMs?: number;
+  } = {}): Promise<unknown> {
+    return this.rpc("imInboxMessages", [{
+      limit: options.limit,
+      onlyUnread: options.onlyUnread === true,
+      timeoutMs: options.timeoutMs,
+    }]);
+  }
+
+  /** Send through TikTok's real chat composer and require exact text re-read. */
+  async tiktokReply(options: {
+    conversationId?: string;
+    peerUid?: string;
+    text: string;
+    dryRun?: boolean;
+    confirmTimeoutMs?: number;
+  }): Promise<unknown> {
+    return this.rpc("imSendText", [{
+      conversationId: options.conversationId,
+      peerUid: options.peerUid,
+      text: options.text,
+      dryRun: options.dryRun !== false,
+      transport: "network",
+      confirmTimeoutMs: options.confirmTimeoutMs,
+    }]);
   }
 
   async tiktokPosts(options: {
@@ -2149,3 +2209,5 @@ class SessionStore {
 export const sessionStore = new SessionStore();
 
 export type { SessionStore };
+
+

@@ -5,3 +5,8 @@ logs/*.log
 .DS_Store
 .env
 pnpm-lock.yaml.bak
+
+scripts/*-out.json
+scripts/*-phase1.json
+test/hello-frida.mjs
+

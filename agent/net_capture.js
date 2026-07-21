@@ -158,11 +158,21 @@ function bodyFromData(data) {
 }
 
 function bodyFromReq(req) {
-    try {
-        return bodyFromData(req.HTTPBody());
-    } catch (_e) {
-        return null;
+    const selectors = [
+        'HTTPBody',
+        'body',
+        'bodyData',
+        'postData',
+        'serializedBody',
+    ];
+    for (let i = 0; i < selectors.length; i++) {
+        try {
+            if (!req.respondsToSelector_(ObjC.selector(selectors[i]))) continue;
+            const body = bodyFromData(req[selectors[i]]());
+            if (body) return body;
+        } catch (_e) { /* Try the next TTHttpRequest body accessor. */ }
     }
+    return null;
 }
 
 function extractSignHeaders(headers) {
@@ -493,6 +503,7 @@ function installTtnetResponseHooks(C) {
                         if (!url) url = safeStr(req.URL() && req.URL().absoluteString());
                         if (!method || method === '?') method = safeStr(req.HTTPMethod() || 'GET');
                         if (!headers || !Object.keys(headers).length) headers = headersFromReq(req);
+                        if (!base.body) base.body = bodyFromReq(req);
                     }
                 } catch (_e) { /* */ }
                 const entry = {
